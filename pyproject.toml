@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myagent"
+version = "0.1.0"
+description = "Multi-agent coding tool — lead agent with subagents and persistent teammates"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.39.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+myagent = "agents.core.runtime:main"
+
+[tool.setuptools.packages.find]
+include = ["agents*"]

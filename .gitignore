@@ -1,0 +1,16 @@
+AGENTS.md
+CLAUDE.md
+temp
+.MyAgent
+.env
+.vscode
+.claude
+agents/task/__pycache__
+agents/context/__pycache__
+agents/skill/__pycache__
+agents/core/__pycache__
+agents/config/__pycache__
+agents/__pycache__
+agents/tools/__pycache__
+agents/team/__pycache__
+myagent.egg-info
