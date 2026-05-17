@@ -20,11 +20,12 @@ from typing import Any
 class ToolSchemas:
     """工具协议定义，集中管理 4 个层级 Agent 的工具 schema。"""
 
-    def __init__(self):
-        self.explore_subagent_tools = [_TOOL_DEFS[k] for k in _EXPLORE_SUBAGENT_TOOLS]
-        self.general_subagent_tools = [_TOOL_DEFS[k] for k in _GENERAL_SUBAGENT_TOOLS]
-        self.teammate_tools = [_TOOL_DEFS[k] for k in _TEAMMATE_TOOLS]
-        self.main_agent_tools = [_TOOL_DEFS[k] for k in _MAIN_AGENT_TOOLS]
+    def __init__(self, mcp_tool_schemas: list[dict] | None = None):
+        self.mcp_tools = mcp_tool_schemas or []
+        self.explore_subagent_tools = [_TOOL_DEFS[k] for k in _EXPLORE_SUBAGENT_TOOLS] + self.mcp_tools
+        self.general_subagent_tools = [_TOOL_DEFS[k] for k in _GENERAL_SUBAGENT_TOOLS] + self.mcp_tools
+        self.teammate_tools = [_TOOL_DEFS[k] for k in _TEAMMATE_TOOLS] + self.mcp_tools
+        self.main_agent_tools = [_TOOL_DEFS[k] for k in _MAIN_AGENT_TOOLS] + self.mcp_tools
 
 # 4 个层级工具集
 

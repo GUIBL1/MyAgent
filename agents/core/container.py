@@ -22,6 +22,7 @@ from agents.team.message_bus import MessageBus
 from agents.team.teammate_manager import TeammateManager
 from agents.tools.base_tools import BaseTools
 from agents.tools.handlers import ToolHandlers
+from agents.tools.mcp_manager import MCPManager
 from agents.tools.schemas import ToolSchemas
 from agents.tools.tool_display import ToolDisplay
 
@@ -31,12 +32,20 @@ class MyAgentApp:
 
     def __init__(self):
         self.config = Config()  # 加载配置与环境变量
+
+        self.mcp_manager = MCPManager(
+            mcp_enabled=self.config.mcp_enabled,
+            mcp_servers_config_path=self.config.mcp_servers_config_path,
+        )
+
         self.base_tools = BaseTools(
             workdir=self.config.workdir,
             require_confirm_high_risk_command=self.config.require_confirm_high_risk_command,
             require_confirm_normal_command=self.config.require_confirm_normal_command
         )
-        self.tool_schemas = ToolSchemas()
+        self.tool_schemas = ToolSchemas(
+            mcp_tool_schemas=self.mcp_manager.get_tool_schemas()
+        )
         self.todo_manager = TodoManager()
         self.skill_manager = SkillManager(
             skills_dir=self.config.skills_dir
@@ -112,6 +121,7 @@ class MyAgentApp:
             background_manager=self.background_manager,
             message_bus=self.message_bus,
             teammate_manager=self.teammate_manager,
+            mcp_handlers=self.mcp_manager.get_tool_handlers(),
         )
         self.subagent._handlers = self.tool_handlers.tool_handlers  # 回填
         self.teammate_manager._tool_handlers = self.tool_handlers.tool_handlers  # 回填

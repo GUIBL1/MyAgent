@@ -26,6 +26,7 @@ class ToolHandlers:
         background_manager,
         message_bus,
         teammate_manager,
+        mcp_handlers: dict[str, Any] | None = None,
     ):
         self.tool_handlers: dict[str, Any] = {
             "run_shell": lambda **kw: base_tools.run_shell(
@@ -153,3 +154,7 @@ class ToolHandlers:
             "get_team_config": lambda **kw: teammate_manager.get_team_config(),
             "idle": lambda **kw: teammate_manager.idle(),
         }
+        if mcp_handlers:
+            for name, handler in mcp_handlers.items():
+                if name not in self.tool_handlers:
+                    self.tool_handlers[name] = handler

@@ -58,6 +58,11 @@ class Config:
         # Skills 存储目录
         self.skills_dir = self.local_state_dir / "skills"
 
+        # MCP 开关
+        self.mcp_enabled = self._env_bool("AGENT_MCP_ENABLED", True)
+        # MCP 服务器配置文件路径
+        self.mcp_servers_config_path = self.local_state_dir / "config" / "mcp_servers.json"
+
         # 会话存储目录
         self.sessions_dir = self.local_state_dir / "sessions"
         # 压缩后会话的原始会话备份目录
