@@ -15,8 +15,8 @@ class PromptManager:
 
     def __init__(self, workdir: Path, skill_manager: Any, worktrees_dir: Path):
         self.main_agent_system_prompt = self._build_main_agent_system_prompt(workdir, skill_manager)
-        self.subagent_system_prompt = self._build_subagent_system_prompt(skill_manager)
-        self.teammate_system_prompt = self._build_teammate_system_prompt(skill_manager, worktrees_dir)
+        self.subagent_system_prompt = self._build_subagent_system_prompt(skill_manager, workdir)
+        self.teammate_system_prompt = self._build_teammate_system_prompt(skill_manager, worktrees_dir, workdir)
         self.compact_prompt = self._build_compact_prompt()
 
     # ======================== private ========================
@@ -27,17 +27,19 @@ class PromptManager:
             "Your name is 'lead', role: 'lead'. "
             f"You are a coding agent at {workdir}. Use tools to solve tasks.\n"
             f"Skills:\n{skill_manager.skill_descriptions()}\n"
+            f"{self._load_project_constraints(workdir)}"
         )
 
-    def _build_subagent_system_prompt(self, skill_manager: Any) -> str:
+    def _build_subagent_system_prompt(self, skill_manager: Any, workdir: Path) -> str:
         """构建 subagent 的系统提示词模板。name 在 run_subagent 时格式化。"""
         return (
             f"Your name is {{name}}. This is your identity.\n"
             f"Skills:\n{skill_manager.skill_descriptions()}\n"
-            "Must return a summary after finishing your job."
+            "Must return a summary after finishing your job.\n"
+            f"{self._load_project_constraints(workdir)}"
         )
 
-    def _build_teammate_system_prompt(self, skill_manager: Any, worktrees_dir: Path) -> str:
+    def _build_teammate_system_prompt(self, skill_manager: Any, worktrees_dir: Path, workdir: Path) -> str:
         """构建 teammate 的系统提示词模板。name、role、team_name、workdir 在 spawn 时格式化。"""
         return (
             f"Your name is {{name}}, role: {{role}}, team: {{team_name}}, at {{workdir}}.\n"
@@ -46,8 +48,28 @@ class PromptManager:
             "Respond to shutdown_request via shutdown_response. If you approve, you will shutdown.\n"
             f"Skills:\n{skill_manager.skill_descriptions()}\n"
             f"\n"
-            f"{self._worktree_instructions(worktrees_dir)}"
+            f"{self._worktree_instructions(worktrees_dir)}\n"
+            f"\n"
+            f"{self._load_project_constraints(workdir)}"
         )
+
+    @staticmethod
+    def _load_project_constraints(workdir: Path) -> str:
+        """按优先级加载项目约束文件。"""
+        candidates = [
+            workdir / ".MyAgent" / "AGENT.md",   # 优先级 1: MyAgent 专用
+            workdir / "CLAUDE.md",               # 优先级 2: 兼容 Claude Code
+            workdir / "AGENT.md",                # 优先级 3: 兼容其他 agent
+        ]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    content = path.read_text(encoding="utf-8").strip()
+                    if content:
+                        return "Project constraints:\n" + content
+                except Exception:
+                    continue
+        return ""
 
     def _build_compact_prompt(self) -> str:
         """构建上下文压缩提示词。"""
