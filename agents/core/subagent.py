@@ -35,7 +35,7 @@ class SubAgent:
         context_compression_manager: Any,
         subagent_sessions_dir: Path,
         handlers: dict[str, Any],
-        system_prompt_template: str,
+        build_system_prompt: Any,
     ):
         self._client = client
         self._model = model
@@ -50,7 +50,7 @@ class SubAgent:
         self._context_compression_manager = context_compression_manager
         self._subagent_sessions_dir = subagent_sessions_dir
         self._handlers = handlers
-        self._system_prompt_template = system_prompt_template
+        self._build_system_prompt = build_system_prompt
 
     # ======================== public ========================
 
@@ -61,7 +61,7 @@ class SubAgent:
         name: str = ""
     ) -> str:
         """运行 subagent 循环，并返回最终文本摘要。"""
-        system_prompt = self._system_prompt_template.format(name=name)
+        system_prompt = self._build_system_prompt(name)
 
         tools = self._explore_subagent_tools if agent_type == "explore" else self._general_subagent_tools
         session_path = self._build_session_path(name)

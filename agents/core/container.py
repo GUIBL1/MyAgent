@@ -87,7 +87,7 @@ class MyAgentApp:
             context_compression_manager=self.context_compression_manager,
             subagent_sessions_dir=self.config.subagent_sessions_dir,
             handlers={},  # 先占位，ToolHandlers 后回填
-            system_prompt_template=self.prompts.subagent_system_prompt,
+            build_system_prompt=self.prompts.subagent_system_prompt,
         )
         self.teammate_manager = TeammateManager(
             team_dir=self.config.team_dir,
@@ -100,7 +100,7 @@ class MyAgentApp:
             idle_timeout=self.config.idle_timeout,
             tool_handlers={},  # 先占位，ToolHandlers 后回填
             tools=self.tool_schemas.teammate_tools,
-            system_prompt_template=self.prompts.teammate_system_prompt,
+            build_system_prompt=self.prompts.teammate_system_prompt,
             context_compression_manager=self.context_compression_manager,
             todo_manager=self.todo_manager,
             background_manager=self.background_manager,

@@ -69,7 +69,7 @@ class TeammateManager:
         idle_timeout: int,
         tool_handlers: dict,
         tools: list[dict],
-        system_prompt_template: str,
+        build_system_prompt: Any,
         context_compression_manager: Any = None,
         todo_manager: Any = None,
         background_manager: Any = None,
@@ -87,7 +87,7 @@ class TeammateManager:
         self._task_manager = task_manager
         self._tool_handlers = tool_handlers
         self._tools = tools
-        self._system_prompt_template = system_prompt_template
+        self._build_system_prompt = build_system_prompt
         self._context_compression_manager = context_compression_manager
         self._todo_manager = todo_manager
         self._background_manager = background_manager
@@ -221,8 +221,8 @@ class TeammateManager:
         """teammate 的主循环（工作阶段 + 空闲阶段）。"""
         with self._team_config_lock:
             team_name = self._team_config.get("team_name", "default")
-        system_prompt = self._system_prompt_template.format(
-            name=name, role=role, team_name=team_name, workdir=self._workdir
+        system_prompt = self._build_system_prompt(
+            name=name, role=role, team_name=team_name, workdir=str(self._workdir)
         )
 
         messages: list[dict] = [{"role": "user", "content": prompt}]
