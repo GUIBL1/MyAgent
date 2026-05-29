@@ -10,6 +10,7 @@ container.py
 from __future__ import annotations
 
 from agents.config.config import Config
+from agents.memory.memory_manager import MemoryManager
 from agents.context.compression_manager import ContextCompressionManager
 from agents.task.background_task import BackgroundManager
 from agents.core.main_loop import MainLoop
@@ -33,6 +34,29 @@ class MyAgentApp:
     def __init__(self):
         self.config = Config()  # 加载配置与环境变量
 
+        self.memory_manager = MemoryManager(
+            embed_base_url=self.config.memory_embed_base_url,
+            embed_auth_token=self.config.memory_embed_auth_token,
+            embed_model=self.config.memory_embed_model,
+            expand_client=self.config.memory_expand_client,
+            expand_model=self.config.memory_expand_model,
+            rerank_client=self.config.memory_rerank_client,
+            rerank_model=self.config.memory_rerank_model,
+            synthesize_client=self.config.memory_synthesize_client,
+            synthesize_model=self.config.memory_synthesize_model,
+            memory_enabled=self.config.memory_enabled,
+            memory_dir=self.config.memory_dir,
+            consolidation_interval_days=self.config.memory_consolidation_interval_days,
+            max_memory_chars=self.config.memory_max_chars,
+            forgetting_days=self.config.memory_forgetting_days,
+            forgetting_interval_days=self.config.memory_forgetting_interval_days,
+            max_vector_records=self.config.memory_max_vector_records,
+            max_rag_candidates=self.config.memory_max_rag_candidates,
+            expand_max_output_tokens=self.config.memory_expand_max_output_tokens,
+            rerank_max_output_tokens=self.config.memory_rerank_max_output_tokens,
+            synthesize_max_output_tokens=self.config.memory_synthesize_max_output_tokens,
+        )
+
         self.mcp_manager = MCPManager(
             mcp_enabled=self.config.mcp_enabled,
             mcp_servers_config_path=self.config.mcp_servers_config_path,
@@ -44,7 +68,8 @@ class MyAgentApp:
             require_confirm_normal_command=self.config.require_confirm_normal_command
         )
         self.tool_schemas = ToolSchemas(
-            mcp_tool_schemas=self.mcp_manager.get_tool_schemas()
+            mcp_tool_schemas=self.mcp_manager.get_tool_schemas(),
+            memory_tool_schemas=self.memory_manager.get_tool_schemas(),
         )
         self.todo_manager = TodoManager()
         self.skill_manager = SkillManager(
@@ -53,10 +78,11 @@ class MyAgentApp:
         self.prompts = PromptManager(
             workdir=self.config.workdir,
             skill_manager=self.skill_manager,
-            worktrees_dir=self.config.worktrees_dir
+            worktrees_dir=self.config.worktrees_dir,
+            memory_prompt=self.memory_manager.build_memory_prompt(),
         )
         self.context_compression_manager = ContextCompressionManager(
-            client=self.config.client,
+            client=self.config.compact_client,
             model=self.config.compact_model,
             backup_dir=self.config.sessions_backup_dir,
             microcompact_tool_result_retention=self.config.microcompact_tool_result_retention,
@@ -74,7 +100,7 @@ class MyAgentApp:
             default_background_timeout=self.config.default_background_timeout
         )
         self.subagent = SubAgent(
-            client=self.config.client,
+            client=self.config.subagent_client,
             model=self.config.subagent_model,
             max_iterations=self.config.subagent_max_iterations,
             max_output_tokens=self.config.subagent_max_output_tokens,
@@ -93,7 +119,7 @@ class MyAgentApp:
             team_dir=self.config.team_dir,
             message_bus=self.message_bus,
             task_manager=self.tasks_manager,
-            client=self.config.client,
+            client=self.config.teammate_client,
             model=self.config.teammate_model,
             workdir=self.config.workdir,
             poll_interval=self.config.poll_interval,
@@ -122,6 +148,7 @@ class MyAgentApp:
             message_bus=self.message_bus,
             teammate_manager=self.teammate_manager,
             mcp_handlers=self.mcp_manager.get_tool_handlers(),
+            memory_handlers=self.memory_manager.get_tool_handlers(),
         )
         self.subagent._handlers = self.tool_handlers.tool_handlers  # 回填
         self.teammate_manager._tool_handlers = self.tool_handlers.tool_handlers  # 回填
@@ -134,7 +161,7 @@ class MyAgentApp:
             context_compression_manager=self.context_compression_manager,
             background_manager=self.background_manager,
             message_bus=self.message_bus,
-            client=self.config.client,
+            client=self.config.main_client,
             model=self.config.main_model,
             token_threshold=self.config.mainagent_token_threshold,
             compact_threshold_pct=self.config.mainagent_compact_threshold_pct,

@@ -13,4 +13,6 @@ agents/config/__pycache__
 agents/__pycache__
 agents/tools/__pycache__
 agents/team/__pycache__
+agents/memory/__pycache__
 myagent.egg-info
+docs

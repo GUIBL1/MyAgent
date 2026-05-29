@@ -27,6 +27,7 @@ class ToolHandlers:
         message_bus,
         teammate_manager,
         mcp_handlers: dict[str, Any] | None = None,
+        memory_handlers: dict[str, Any] | None = None,
     ):
         self.tool_handlers: dict[str, Any] = {
             "run_shell": lambda **kw: base_tools.run_shell(
@@ -156,5 +157,9 @@ class ToolHandlers:
         }
         if mcp_handlers:
             for name, handler in mcp_handlers.items():
+                if name not in self.tool_handlers:
+                    self.tool_handlers[name] = handler
+        if memory_handlers:
+            for name, handler in memory_handlers.items():
                 if name not in self.tool_handlers:
                     self.tool_handlers[name] = handler

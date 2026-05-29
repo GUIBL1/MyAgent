@@ -29,17 +29,59 @@ class Config:
         _env_path.parent.mkdir(parents=True, exist_ok=True)
         load_dotenv(dotenv_path=_env_path, override=True)
 
-        # 所有组件共用同一个 LLM 客户端。
-        self.client = Anthropic(
-            base_url=os.getenv("ANTHROPIC_BASE_URL"),
-            auth_token=os.getenv("ANTHROPIC_AUTH_TOKEN"),
+        # main agent
+        self.main_client = Anthropic(
+            base_url=os.getenv("AGENT_MAIN_BASE_URL"),
+            auth_token=os.getenv("AGENT_MAIN_AUTH_TOKEN"),
         )
-
-        # 各组件独立模型配置
         self.main_model = os.getenv("AGENT_MAIN_MODEL")
+
+        # subagent
+        self.subagent_client = Anthropic(
+            base_url=os.getenv("AGENT_SUBAGENT_BASE_URL"),
+            auth_token=os.getenv("AGENT_SUBAGENT_AUTH_TOKEN"),
+        )
         self.subagent_model = os.getenv("AGENT_SUBAGENT_MODEL")
+
+        # teammate
+        self.teammate_client = Anthropic(
+            base_url=os.getenv("AGENT_TEAMMATE_BASE_URL"),
+            auth_token=os.getenv("AGENT_TEAMMATE_AUTH_TOKEN"),
+        )
         self.teammate_model = os.getenv("AGENT_TEAMMATE_MODEL")
+
+        # compact
+        self.compact_client = Anthropic(
+            base_url=os.getenv("AGENT_COMPACT_BASE_URL"),
+            auth_token=os.getenv("AGENT_COMPACT_AUTH_TOKEN"),
+        )
         self.compact_model = os.getenv("AGENT_COMPACT_MODEL")
+
+        # memory embed
+        self.memory_embed_base_url = os.getenv("AGENT_MEMORY_EMBED_BASE_URL")
+        self.memory_embed_auth_token = os.getenv("AGENT_MEMORY_EMBED_AUTH_TOKEN")
+        self.memory_embed_model = os.getenv("AGENT_MEMORY_EMBED_MODEL")
+
+        # memory expand
+        self.memory_expand_client = Anthropic(
+            base_url=os.getenv("AGENT_MEMORY_EXPAND_BASE_URL"),
+            auth_token=os.getenv("AGENT_MEMORY_EXPAND_AUTH_TOKEN"),
+        )
+        self.memory_expand_model = os.getenv("AGENT_MEMORY_EXPAND_MODEL")
+
+        # memory rerank
+        self.memory_rerank_client = Anthropic(
+            base_url=os.getenv("AGENT_MEMORY_RERANK_BASE_URL"),
+            auth_token=os.getenv("AGENT_MEMORY_RERANK_AUTH_TOKEN"),
+        )
+        self.memory_rerank_model = os.getenv("AGENT_MEMORY_RERANK_MODEL")
+
+        # memory synthesize
+        self.memory_synthesize_client = Anthropic(
+            base_url=os.getenv("AGENT_MEMORY_SYNTHESIZE_BASE_URL"),
+            auth_token=os.getenv("AGENT_MEMORY_SYNTHESIZE_AUTH_TOKEN"),
+        )
+        self.memory_synthesize_model = os.getenv("AGENT_MEMORY_SYNTHESIZE_MODEL")
 
         # 定义全局路径常量，确保所有模块使用统一的目录结构
         self.workdir = Path.cwd()
@@ -76,6 +118,13 @@ class Config:
 
         # 工作树物理目录（由 LLM 通过 bash 管理，代码只约定路径）
         self.worktrees_dir = self.local_state_dir / "worktrees"
+
+
+        self.global_state_dir = Path.home() / ".MyAgent"
+
+        # 记忆系统存储目录（全局，跨项目共享）
+        self.memory_dir = self.global_state_dir / "memory"
+
 
         # ======================== 运行时参数 ========================
 
@@ -127,6 +176,25 @@ class Config:
         self.teammate_compact_threshold_pct = float(os.getenv("AGENT_TEAMMATE_COMPACT_THRESHOLD_PCT", "0.8"))
         # teammate 是否开启每轮微压缩
         self.teammate_micro_compact_enabled = self._env_bool("AGENT_TEAMMATE_MICRO_COMPACT_ENABLED", False)
+
+        # 记忆系统开关
+        self.memory_enabled = self._env_bool("AGENT_MEMORY_ENABLED", True)
+        # 记忆整理时间阈值（天）
+        self.memory_consolidation_interval_days = int(os.getenv("AGENT_MEMORY_CONSOLIDATION_INTERVAL_DAYS", "30"))
+        # MEMORY.md 空间阈值（字符数）
+        self.memory_max_chars = int(os.getenv("AGENT_MEMORY_MAX_CHARS", "1500"))
+        # 记忆过期天数，距末次访问超此天数且访问次数<2的记忆将被遗忘
+        self.memory_forgetting_days = int(os.getenv("AGENT_MEMORY_FORGETTING_DAYS", "90"))
+        # 遗忘触发间隔（天），距上次遗忘超过此天数才再次执行
+        self.memory_forgetting_interval_days = int(os.getenv("AGENT_MEMORY_FORGETTING_INTERVAL_DAYS", "90"))
+        # Chroma 向量记录硬上限
+        self.memory_max_vector_records = int(os.getenv("AGENT_MEMORY_MAX_VECTOR_RECORDS", "5000"))
+        # RAG 召回 + 重排序后送入合成的最大候选数
+        self.memory_max_rag_candidates = int(os.getenv("AGENT_MEMORY_MAX_RAG_CANDIDATES", "10"))
+        # expand / rerank / synthesize 各自最大输出 token 数
+        self.memory_expand_max_output_tokens = int(os.getenv("AGENT_MEMORY_EXPAND_MAX_TOKENS", "100000"))
+        self.memory_rerank_max_output_tokens = int(os.getenv("AGENT_MEMORY_RERANK_MAX_TOKENS", "100000"))
+        self.memory_synthesize_max_output_tokens = int(os.getenv("AGENT_MEMORY_SYNTHESIZE_MAX_TOKENS", "100000"))
 
     # ======================== private ========================
 

@@ -13,10 +13,11 @@ from typing import Any
 class PromptManager:
     """提示词管理器，在构造时预计算所有模板/系统提示词。"""
 
-    def __init__(self, workdir: Path, skill_manager: Any, worktrees_dir: Path):
+    def __init__(self, workdir: Path, skill_manager: Any, worktrees_dir: Path, memory_prompt: str = ""):
         self._workdir = workdir
         self._skill_manager = skill_manager
         self._worktrees_dir = worktrees_dir
+        self._memory_prompt = memory_prompt
 
         self.main_agent_system_prompt = self._build_main_agent_system_prompt()
         self.subagent_system_prompt = lambda name: self._build_subagent_system_prompt(name)
@@ -27,25 +28,31 @@ class PromptManager:
 
     def _build_main_agent_system_prompt(self) -> str:
         """构建主代理系统提示词。"""
-        return (
+        prompt = (
             "Your name is 'lead', role: 'lead'. "
             f"You are a coding agent at {self._workdir}. Use tools to solve tasks.\n"
             f"Skills:\n{self._skill_manager.skill_descriptions()}\n"
             f"{self._load_project_constraints(self._workdir)}"
         )
+        if self._memory_prompt:
+            prompt += "\n\n" + self._memory_prompt
+        return prompt
 
     def _build_subagent_system_prompt(self, name: str) -> str:
         """构建 subagent 系统提示词，name 由调用方传入。"""
-        return (
+        prompt = (
             f"Your name is {name}. This is your identity.\n"
             f"Skills:\n{self._skill_manager.skill_descriptions()}\n"
             "Must return a summary after finishing your job.\n"
             f"{self._load_project_constraints(self._workdir)}"
         )
+        if self._memory_prompt:
+            prompt += "\n\n" + self._memory_prompt
+        return prompt
 
     def _build_teammate_system_prompt(self, name: str, role: str, team_name: str, workdir: str) -> str:
         """构建 teammate 系统提示词，动态参数由调用方传入。"""
-        return (
+        prompt = (
             f"Your name is {name}, role: {role}, team: {team_name}, at {workdir}.\n"
             "Use tool idle when done with current work. You may auto-claim tasks.\n"
             "If you have a major execution plan, submit it via plan_approval_request to lead and wait for approval before executing.\n"
@@ -56,6 +63,9 @@ class PromptManager:
             f"\n"
             f"{self._load_project_constraints(self._workdir)}"
         )
+        if self._memory_prompt:
+            prompt += "\n\n" + self._memory_prompt
+        return prompt
 
     @staticmethod
     def _load_project_constraints(workdir: Path) -> str:
