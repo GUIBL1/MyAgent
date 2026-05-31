@@ -14,5 +14,10 @@ agents/__pycache__
 agents/tools/__pycache__
 agents/team/__pycache__
 agents/memory/__pycache__
+agents/server/__pycache__
+frontend/node_modules
+frontend/dist
+frontend/tsconfig.tsbuildinfo
 myagent.egg-info
 docs
+.superpowers

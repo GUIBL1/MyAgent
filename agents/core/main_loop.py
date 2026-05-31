@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+from agents.core.stream_events import EventType, StreamEvent
 
 
 class MainLoop:
@@ -39,7 +42,6 @@ class MainLoop:
         micro_compact_enabled: bool,
         max_output_tokens: int,
         sessions_dir: Path | None = None,
-        tool_display: Any = None,
     ):
         self._system_prompt = system_prompt
         self._tools = tools
@@ -56,11 +58,10 @@ class MainLoop:
         self._max_output_tokens = max_output_tokens
         self._sessions_dir = sessions_dir
         self._session_path = self._build_session_path() if self._sessions_dir else None
-        self._tool_display = tool_display
 
     # ======================== public ========================
 
-    def run_main_loop(self, messages: list) -> None:
+    def run_main_loop(self, messages: list) -> Iterator[StreamEvent]:
         """执行主代理循环，直到模型停止发起工具调用。"""
         todo_agent_name = ""
         background_task_agent_name = "lead"
@@ -108,8 +109,6 @@ class MainLoop:
                 if self._session_path:
                     self._write_jsonl(self._session_path, messages[-1], mode="a")
 
-            in_thinking = False
-            first_text = True
             with self._client.messages.stream(
                 model=self._model,
                 system=self._system_prompt,
@@ -118,33 +117,13 @@ class MainLoop:
                 max_tokens=self._max_output_tokens,
             ) as stream:
                 for event in stream:
-                    if event.type == "content_block_start":
-                        if event.content_block.type == "thinking":
-                            in_thinking = True
-                            print("\033[95m<think>\033[0m\n", end="", flush=True)
-                        elif event.content_block.type == "text":
-                            in_thinking = False
-
-                    elif event.type == "content_block_delta":
+                    if event.type == "content_block_delta":
                         if event.delta.type == "thinking_delta":
-                            print(event.delta.thinking, end="", flush=True)
+                            yield StreamEvent(type=EventType.THINKING, delta=event.delta.thinking)
                         elif event.delta.type == "text_delta":
-                            if in_thinking:
-                                print("\n\033[95m</think>\033[0m", flush=True)
-                                in_thinking = False
-                            if first_text:
-                                print("\033[96mReply >>\033[0m ", end="")
-                                first_text = False
-                            print(event.delta.text, end="", flush=True)
-
-                    elif event.type == "content_block_stop":
-                        if in_thinking:
-                            print("\n\033[95m</think>\033[0m", flush=True)
-                            in_thinking = False
+                            yield StreamEvent(type=EventType.TEXT, delta=event.delta.text)
 
                 response = stream.get_final_message()
-            if not first_text:
-                print()
 
             total_tokens = response.usage.input_tokens + response.usage.output_tokens
             messages.append({"role": "assistant", "content": response.content})
@@ -152,6 +131,7 @@ class MainLoop:
                 self._write_jsonl(self._session_path, messages[-1], mode="a")
 
             if response.stop_reason != "tool_use":
+                yield StreamEvent(type=EventType.ASSISTANT_DONE, stop_reason=response.stop_reason)
                 return
 
             results: list[dict] = []
@@ -161,13 +141,24 @@ class MainLoop:
                 if block.type != "tool_use":
                     continue
 
-                if self._tool_display:
-                    self._tool_display.show_call(block.name)
+                yield StreamEvent(
+                    type=EventType.TOOL_START,
+                    tool_id=block.id,
+                    tool_name=block.name,
+                    tool_input=dict(block.input) if block.input else {},
+                )
+
                 handler = self._tool_handlers.get(block.name)
                 try:
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}."
                 except Exception as exc:
                     output = f"Tool execution error: {exc}"
+
+                yield StreamEvent(
+                    type=EventType.TOOL_RESULT,
+                    tool_id=block.id,
+                    content=str(output),
+                )
 
                 results.append(
                     {

@@ -25,7 +25,6 @@ from agents.tools.base_tools import BaseTools
 from agents.tools.handlers import ToolHandlers
 from agents.tools.mcp_manager import MCPManager
 from agents.tools.schemas import ToolSchemas
-from agents.tools.tool_display import ToolDisplay
 
 
 class MyAgentApp:
@@ -137,7 +136,6 @@ class MyAgentApp:
             max_output_tokens=self.config.teammate_max_output_tokens,
             teammate_sessions_dir=self.config.teammate_sessions_dir,
         )
-        self.tool_display = ToolDisplay()
         self.tool_handlers = ToolHandlers(
             base_tools=self.base_tools,
             todo_manager=self.todo_manager,
@@ -168,10 +166,9 @@ class MyAgentApp:
             micro_compact_enabled=self.config.mainagent_micro_compact_enabled,
             max_output_tokens=self.config.mainagent_max_output_tokens,
             sessions_dir=self.config.mainagent_sessions_dir,
-            tool_display=self.tool_display,
         )
 
 
-    def agent_loop(self, messages: list):
-        """执行一轮完整主代理循环。"""
-        self.main_loop.run_main_loop(messages)
+    def start_agent_loop(self, messages: list):
+        """启动一次主代理循环，返回 StreamEvent 生成器供 WebSocket 消费。"""
+        return self.main_loop.run_main_loop(messages)
