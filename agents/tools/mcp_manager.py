@@ -22,7 +22,10 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
 class MCPServerConnection:
-    """管理单个 MCP 服务器子进程连接的生命周期。"""
+    """管理单个 MCP 服务器子进程连接的生命周期。
+
+    所有异步操作在独立的 daemon 线程中运行，避免与 uvicorn 的主 event loop 冲突。
+    """
 
     def __init__(
         self,
@@ -35,8 +38,11 @@ class MCPServerConnection:
         self._command = command
         self._args = args
         self._env = env
-        self._lock = threading.RLock()
         self._event_loop = asyncio.new_event_loop()
+        self._event_loop_thread = threading.Thread(
+            target=self._event_loop.run_forever, daemon=True
+        )
+        self._event_loop_thread.start()
         self._session: ClientSession | None = None
         self._stdio_context = None
         self._stdio_read = None
@@ -46,71 +52,69 @@ class MCPServerConnection:
 
     def initialize(self) -> None:
         """启动子进程并完成 MCP 协议握手。"""
-        with self._lock:
-            self._event_loop.run_until_complete(self._async_initialize())
+        self._run_in_event_loop(self._async_initialize())
 
     def list_tools(self) -> list:
         """获取服务器声明的工具列表。"""
-        with self._lock:
-            return self._event_loop.run_until_complete(self._async_list_tools())
+        return self._run_in_event_loop(self._async_list_tools())
 
     def call_tool(self, tool_name: str, arguments: dict) -> str:
         """同步调用 MCP 工具，返回字符串结果。"""
-        with self._lock:
-            try:
-                return self._event_loop.run_until_complete(
-                    self._async_call_tool(tool_name, arguments)
-                )
-            except Exception as exc:
-                return f"Tool mcp__{self._server_name}__{tool_name} execution error: {exc}"
+        try:
+            return self._run_in_event_loop(
+                self._async_call_tool(tool_name, arguments)
+            )
+        except Exception as exc:
+            return f"Tool mcp__{self._server_name}__{tool_name} execution error: {exc}"
 
     def list_resources(self) -> list:
         """获取服务器声明的资源列表。"""
-        with self._lock:
-            return self._event_loop.run_until_complete(self._async_list_resources())
+        return self._run_in_event_loop(self._async_list_resources())
 
     def list_resource_templates(self) -> list:
         """获取服务器声明的资源模板列表（含 uriTemplate）。"""
-        with self._lock:
-            return self._event_loop.run_until_complete(self._async_list_resource_templates())
+        return self._run_in_event_loop(self._async_list_resource_templates())
 
     def read_resource(self, uri: str) -> str:
         """同步读取 MCP 资源，返回字符串结果。"""
-        with self._lock:
-            try:
-                return self._event_loop.run_until_complete(
-                    self._async_read_resource(uri)
-                )
-            except Exception as exc:
-                return f"MCP '{self._server_name}' read_resource error: {exc}"
+        try:
+            return self._run_in_event_loop(self._async_read_resource(uri))
+        except Exception as exc:
+            return f"MCP '{self._server_name}' read_resource error: {exc}"
 
     def list_prompts(self) -> list:
         """获取服务器声明的提示词模板列表。"""
-        with self._lock:
-            return self._event_loop.run_until_complete(self._async_list_prompts())
+        return self._run_in_event_loop(self._async_list_prompts())
 
     def get_prompt(self, prompt_name: str, arguments: dict | None = None) -> str:
         """同步获取 MCP 提示词模板，返回字符串结果。"""
-        with self._lock:
-            try:
-                return self._event_loop.run_until_complete(
-                    self._async_get_prompt(prompt_name, arguments or {})
-                )
-            except Exception as exc:
-                return f"MCP '{self._server_name}' get_prompt error: {exc}"
+        try:
+            return self._run_in_event_loop(
+                self._async_get_prompt(prompt_name, arguments or {})
+            )
+        except Exception as exc:
+            return f"MCP '{self._server_name}' get_prompt error: {exc}"
 
     def shutdown(self) -> None:
         """关闭连接并终止子进程。"""
-        with self._lock:
+        try:
+            self._run_in_event_loop(self._async_shutdown())
+        except Exception:
+            pass
+        finally:
             try:
-                self._event_loop.run_until_complete(self._async_shutdown())
+                self._event_loop.call_soon_threadsafe(self._event_loop.stop)
+                self._event_loop_thread.join(timeout=5)
+                self._event_loop.close()
             except Exception:
                 pass
-            finally:
-                try:
-                    self._event_loop.close()
-                except Exception:
-                    pass
+
+    # ======================== private ========================
+
+    def _run_in_event_loop(self, coroutine):
+        """将协程提交到独立线程的 event loop 中执行，阻塞等待结果。"""
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._event_loop)
+        return future.result(timeout=300)
 
     # ======================== private ========================
 
