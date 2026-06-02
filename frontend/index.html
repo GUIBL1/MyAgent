@@ -4,15 +4,50 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MyAgent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --amber:         #D97706;
+      --amber-hover:   #B45309;
+      --amber-subtle:  rgba(217, 119, 6, 0.08);
+      --amber-ghost:   rgba(217, 119, 6, 0.05);
+      --blue:          #2563EB;
+      --green:         #059669;
+      --green-subtle:  rgba(5, 150, 105, 0.08);
+      --red:           #DC2626;
+      --red-subtle:    rgba(220, 38, 38, 0.08);
+      --yellow:        #B45309;
+      --yellow-subtle: rgba(180, 83, 9, 0.08);
+      --bg:            #FFFBEB;
+      --surface:       #FFFFFF;
+      --surface-hover: #FCF6F0;
+      --glass:         rgba(255, 251, 235, 0.88);
+      --glass-border:  rgba(217, 119, 6, 0.12);
+      --border:        #EDE3D5;
+      --border-light:  #F5EDE4;
+      --fg:            #1A1A1A;
+      --fg-secondary:  #5C5C5C;
+      --fg-muted:      #8C8C8C;
+      --code-bg:       #F8F3EC;
+      --code-border:   #EDE3D5;
+      --code-fg:       #B45309;
+      --radius-sm:     6px;
+      --radius-md:     10px;
+      --radius-lg:     14px;
+    }
+
     body {
-      background: #27272a;
-      color: #e4e4ec;
-      font-family: 'Inter', -apple-system, sans-serif;
-      font-size: 14px;
-      line-height: 1.6;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
       -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
     #app { height: 100vh; display: flex; flex-direction: column; }
   </style>
