@@ -1,7 +1,15 @@
 """
 流事件类型定义
 
-MainLoop 生成器产出的标准化事件，供 WebSocket 消费。
+MainLoop / SubAgent / Compact 等模块产出的标准化事件，供 WebSocket 消费。
+
+事件按前端渲染方式分为三类：
+渲染事件：TEXT / THINKING / TOOL_START / TOOL_RESULT / ASSISTANT_DONE / ERROR
+    前端直接渲染到当前面板（主对话或子面板，由 SUB_PANEL_ENTER/EXIT 控制切换）
+状态事件：MICRO_COMPACT / AUTO_COMPACT_* / BACKGROUND_NOTIFICATION / INBOX_MESSAGE /TODO_REMINDER / TOKEN_USAGE
+    各有独特 UI，前端按类型区分渲染
+非渲染事件：CONTEXT_ENTRY / CONTEXT_PATCH
+    不推前端，仅写 transcript.jsonl 供会话回放和 rewind
 """
 
 from __future__ import annotations
@@ -12,6 +20,8 @@ from typing import Any
 
 class EventType(Enum):
     """流事件类型枚举。"""
+
+    # === 渲染事件 ===
     TEXT = "text"
     THINKING = "thinking"
     TOOL_START = "tool_start"
@@ -19,17 +29,54 @@ class EventType(Enum):
     ASSISTANT_DONE = "assistant_done"
     ERROR = "error"
 
+    # === 子面板切换 ===
+    SUB_PANEL_ENTER = "sub_panel_enter"
+    SUB_PANEL_EXIT = "sub_panel_exit"
+
+    # === 状态事件 ===
+    MICRO_COMPACT = "micro_compact"
+    AUTO_COMPACT_START = "auto_compact_start"
+    AUTO_COMPACT_THINKING = "auto_compact_thinking"
+    AUTO_COMPACT_TEXT = "auto_compact_text"
+    AUTO_COMPACT_DONE = "auto_compact_done"
+    BACKGROUND_NOTIFICATION = "background_notification"
+    INBOX_MESSAGE = "inbox_message"
+    TODO_REMINDER = "todo_reminder"
+    TOKEN_USAGE = "token_usage"
+
+    # === 非渲染事件 ===
+    CONTEXT_ENTRY = "context_entry"
+    CONTEXT_PATCH = "context_patch"
+
 
 class StreamEvent:
     """MainLoop 生成器的单个产出事件。
 
     不同事件类型携带的载荷字段：
 
-    - text / thinking:     delta
-    - tool_start:          tool_id, tool_name, tool_input
-    - tool_result:         tool_id, content
-    - assistant_done:      stop_reason
-    - error:               error_msg
+    ┌──────────────────────┬──────────────────────────────────────┐
+    │ 事件类型              │ 载荷字段                              │
+    ├──────────────────────┼──────────────────────────────────────┤
+    │ TEXT                 │ delta                                │
+    │ THINKING             │ delta                                │
+    │ TOOL_START           │ tool_id, tool_name, tool_input       │
+    │ TOOL_RESULT          │ tool_id, content                     │
+    │ ASSISTANT_DONE       │ stop_reason                          │
+    │ ERROR                │ error_msg                            │
+    │ SUB_PANEL_ENTER      │ tool_id, tool_name                   │
+    │ SUB_PANEL_EXIT       │ tool_id                              │
+    │ MICRO_COMPACT        │ content                              │
+    │ AUTO_COMPACT_START   │ content                              │
+    │ AUTO_COMPACT_THINKING│ delta                                │
+    │ AUTO_COMPACT_TEXT    │ delta                                │
+    │ AUTO_COMPACT_DONE    │ content                              │
+    │ BACKGROUND_NOTIFICATION│ content                            │
+    │ INBOX_MESSAGE        │ content                              │
+    │ TODO_REMINDER        │ content                              │
+    │ TOKEN_USAGE          │ content                              │
+    │ CONTEXT_ENTRY        │ content (序列化的 Anthropic API msg)  │
+    │ CONTEXT_PATCH        │ content (序列化的 patch list)         │
+    └──────────────────────┴──────────────────────────────────────┘
     """
 
     def __init__(
@@ -53,6 +100,15 @@ class StreamEvent:
         self._error_msg = error_msg
 
     # ======================== public ========================
+
+    @property
+    def event_type(self) -> EventType:
+        return self._event_type
+
+    @property
+    def content(self) -> str | None:
+        return self._content
+
     def to_dict(self) -> dict[str, Any]:
         """转为 JSON 可序列化的 dict，只包含值非 None 的字段以减小 payload。"""
         result: dict[str, Any] = {"type": self._event_type.value}

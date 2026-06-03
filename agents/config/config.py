@@ -109,8 +109,6 @@ class Config:
         self.sessions_dir = self.local_state_dir / "sessions"
         # 压缩后会话的原始会话备份目录
         self.sessions_backup_dir = self.sessions_dir / "backup"
-        # Subagent 会话目录
-        self.subagent_sessions_dir = self.sessions_dir / "subagents"
         # Teammate 会话目录
         self.teammate_sessions_dir = self.sessions_dir / "teammates"
         # MainAgent 会话目录

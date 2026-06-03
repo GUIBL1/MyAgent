@@ -14,6 +14,7 @@ from agents.memory.memory_manager import MemoryManager
 from agents.context.compression_manager import ContextCompressionManager
 from agents.task.background_task import BackgroundManager
 from agents.core.main_loop import MainLoop
+from agents.core.session_manager import SessionManager
 from agents.skill.skill_manager import SkillManager
 from agents.task.task_manager import TaskManager
 from agents.task.todo_manager import TodoManager
@@ -110,7 +111,6 @@ class MyAgentApp:
             general_subagent_tools=self.tool_schemas.general_subagent_tools,
             todo_manager=self.todo_manager,
             context_compression_manager=self.context_compression_manager,
-            subagent_sessions_dir=self.config.subagent_sessions_dir,
             handlers={},  # 先占位，ToolHandlers 后回填
             build_system_prompt=self.prompts.subagent_system_prompt,
         )
@@ -151,6 +151,8 @@ class MyAgentApp:
         self.subagent._handlers = self.tool_handlers.tool_handlers  # 回填
         self.teammate_manager._tool_handlers = self.tool_handlers.tool_handlers  # 回填
 
+        self.session_manager = SessionManager(sessions_dir=self.config.mainagent_sessions_dir)
+
         self.main_loop = MainLoop(
             system_prompt=self.prompts.main_agent_system_prompt,
             tools=self.tool_schemas.main_agent_tools,
@@ -165,7 +167,7 @@ class MyAgentApp:
             compact_threshold_pct=self.config.mainagent_compact_threshold_pct,
             micro_compact_enabled=self.config.mainagent_micro_compact_enabled,
             max_output_tokens=self.config.mainagent_max_output_tokens,
-            sessions_dir=self.config.mainagent_sessions_dir,
+            session_manager=self.session_manager,
         )
 
 

@@ -11,10 +11,10 @@ subagent 拥有独立消息上下文，执行完成后仅返回摘要文本，�
 from __future__ import annotations
 
 import json
-import re
-import time
-from pathlib import Path
+from collections.abc import Iterator
 from typing import Any
+
+from agents.core.stream_events import EventType, StreamEvent
 
 
 class SubAgent:
@@ -33,7 +33,6 @@ class SubAgent:
         general_subagent_tools: list[dict[str, Any]],
         todo_manager: Any,
         context_compression_manager: Any,
-        subagent_sessions_dir: Path,
         handlers: dict[str, Any],
         build_system_prompt: Any,
     ):
@@ -48,7 +47,6 @@ class SubAgent:
         self._general_subagent_tools = general_subagent_tools
         self._todo_manager = todo_manager
         self._context_compression_manager = context_compression_manager
-        self._subagent_sessions_dir = subagent_sessions_dir
         self._handlers = handlers
         self._build_system_prompt = build_system_prompt
 
@@ -59,32 +57,32 @@ class SubAgent:
         prompt: str,
         agent_type: str = "explore",
         name: str = ""
-    ) -> str:
-        """运行 subagent 循环，并返回最终文本摘要。"""
+    ) -> Iterator[StreamEvent]:
+        """运行 subagent 循环，yield 事件流，最终 return 文本摘要。"""
         system_prompt = self._build_system_prompt(name)
-
         tools = self._explore_subagent_tools if agent_type == "explore" else self._general_subagent_tools
-        session_path = self._build_session_path(name)
 
         todo_agent_name = ""
         rounds_without_todo = 0
         total_tokens = 0
 
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-        self._write_jsonl(session_path, messages[0], mode="w")  # 首条消息，覆写模式写入
 
         response = None
 
         for _ in range(self._max_iterations):
             if self._context_compression_manager:
                 if self._micro_compact_enabled:
-                    self._context_compression_manager.micro_compact(messages)
-                    self._write_jsonl(session_path, messages, mode="w")  # 覆写为压缩后的消息
+                    for compact_event in self._context_compression_manager.micro_compact(messages):
+                        if compact_event.event_type == EventType.MICRO_COMPACT:
+                            yield compact_event
                 if total_tokens >= self._token_threshold * self._compact_threshold_pct:
-                    print("[subagent auto-compact]")
-                    messages[:] = self._context_compression_manager.auto_compact(messages)
-                    total_tokens = 0
-                    self._write_jsonl(session_path, messages, mode="w")  # 覆写为压缩后的消息
+                    for compact_event in self._context_compression_manager.auto_compact(messages):
+                        if compact_event.event_type == EventType.CONTEXT_ENTRY:
+                            messages[:] = [json.loads(compact_event._content)]
+                            total_tokens = 0
+                        else:
+                            yield compact_event
 
             try:
                 with self._client.messages.stream(
@@ -94,16 +92,38 @@ class SubAgent:
                     tools=tools,
                     max_tokens=self._max_output_tokens,
                 ) as stream:
+                    for api_event in stream:
+                        if api_event.type == "content_block_delta":
+                            if api_event.delta.type == "thinking_delta":
+                                yield StreamEvent(
+                                    type=EventType.THINKING,
+                                    delta=api_event.delta.thinking,
+                                )
+                            elif api_event.delta.type == "text_delta":
+                                yield StreamEvent(
+                                    type=EventType.TEXT,
+                                    delta=api_event.delta.text,
+                                )
+
                     response = stream.get_final_message()
             except Exception as exc:
+                yield StreamEvent(
+                    type=EventType.ERROR,
+                    error_msg=f"LLM API error: {exc}",
+                )
                 return f"Subagent failed: LLM API error {exc}"
 
             total_tokens = response.usage.input_tokens + response.usage.output_tokens
 
+            yield StreamEvent(
+                type=EventType.TOKEN_USAGE,
+                content=f"本轮: {total_tokens} tokens (in: {response.usage.input_tokens}, out: {response.usage.output_tokens})",
+            )
+
             messages.append({"role": "assistant", "content": response.content})
-            self._write_jsonl(session_path, messages[-1], mode="a")  # 追加模式写入最新消息
 
             if response.stop_reason != "tool_use":
+                yield StreamEvent(type=EventType.ASSISTANT_DONE)
                 break
 
             results: list[dict[str, str]] = []
@@ -116,6 +136,13 @@ class SubAgent:
                 tool_name = block.name
                 tool_input = block.input
 
+                yield StreamEvent(
+                    type=EventType.TOOL_START,
+                    tool_id=block.id,
+                    tool_name=tool_name,
+                    tool_input=dict(tool_input) if tool_input else {},
+                )
+
                 handler = self._handlers.get(tool_name)
                 try:
                     output = (
@@ -125,6 +152,17 @@ class SubAgent:
                     )
                 except Exception as exc:
                     output = f"Tool {tool_name} failed with error: {exc}"
+                    yield StreamEvent(
+                        type=EventType.ERROR,
+                        tool_id=block.id,
+                        error_msg=str(exc),
+                    )
+
+                yield StreamEvent(
+                    type=EventType.TOOL_RESULT,
+                    tool_id=block.id,
+                    content=str(output),
+                )
 
                 result_entry = {
                     "type": "tool_result",
@@ -144,7 +182,6 @@ class SubAgent:
                     results.append(reminder)
 
             messages.append({"role": "user", "content": results})
-            self._write_jsonl(session_path, messages[-1], mode="a")  # 追加模式写入最新消息
 
         if response:
             text_parts = [
@@ -155,26 +192,3 @@ class SubAgent:
             summary = "\n".join(text_parts).strip()
             return summary or "No summary."
         return "Subagent failed."
-
-    # ======================== private ========================
-
-    def _build_session_path(self, name: str) -> Path:
-        """根据 name 与时间戳构造会话文件路径。"""
-        safe = re.sub(r'[^\w]', '_', name.strip(), flags=re.UNICODE).strip('_') if name.strip() else "subagent"
-        filename = f"{safe}_{int(time.time() * 1_000_000)}.jsonl"
-        filepath = self._subagent_sessions_dir / filename
-        try:
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        return filepath
-
-    def _write_jsonl(self, filepath: Path, entry: Any, mode: str = "a") -> None:
-        """写入 JSONL 文件。entry 为单条消息或消息列表。mode="a" 追加，mode="w" 覆写。异常时仅打印警告。"""
-        entries = entry if isinstance(entry, list) else [entry]
-        try:
-            with open(filepath, mode, encoding="utf-8") as f:
-                for item in entries:
-                    f.write(json.dumps(item, default=str, ensure_ascii=False) + "\n")
-        except (OSError, TypeError) as exc:
-            print(f"[subagent] session write failed: {exc}")

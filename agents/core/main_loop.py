@@ -14,9 +14,7 @@ loop.py
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 from agents.core.stream_events import EventType, StreamEvent
@@ -41,7 +39,7 @@ class MainLoop:
         compact_threshold_pct: float,
         micro_compact_enabled: bool,
         max_output_tokens: int,
-        sessions_dir: Path | None = None,
+        session_manager: Any,
     ):
         self._system_prompt = system_prompt
         self._tools = tools
@@ -56,8 +54,7 @@ class MainLoop:
         self._compact_threshold_pct = compact_threshold_pct
         self._micro_compact_enabled = micro_compact_enabled
         self._max_output_tokens = max_output_tokens
-        self._sessions_dir = sessions_dir
-        self._session_path = self._build_session_path() if self._sessions_dir else None
+        self._session_manager = session_manager
 
     # ======================== public ========================
 
@@ -68,22 +65,27 @@ class MainLoop:
         rounds_without_todo = 0
         total_tokens = 0
 
-        # 全量覆写会话文件，确保与 LLM 实际收到的 messages 一致。
-        if self._session_path:
-            self._write_jsonl(self._session_path, messages, mode="w")
+        # 覆写 context.jsonl
+        if self._session_manager.session_id:
+            self._session_manager.save_context_full(messages)
 
         while True:
             # 每轮微压缩（受开关控制），超阈值触发全量压缩。
             if self._micro_compact_enabled:
-                self._context_compression_manager.micro_compact(messages)
-                if self._session_path:
-                    self._write_jsonl(self._session_path, messages, mode="w")
+                yield from self._context_compression_manager.micro_compact(messages)
+                if self._session_manager.session_id:
+                    self._session_manager.save_context_full(messages)
+            # 全量压缩
             if total_tokens >= self._token_threshold * self._compact_threshold_pct:
-                print("[auto-compact triggered]")
-                messages[:] = self._context_compression_manager.auto_compact(messages)
-                total_tokens = 0
-                if self._session_path:
-                    self._write_jsonl(self._session_path, messages, mode="w")
+                for compact_event in self._context_compression_manager.auto_compact(messages):
+                    yield compact_event
+                    if compact_event.event_type == EventType.CONTEXT_ENTRY:
+                        # 摘要替换 messages
+                        ce = json.loads(compact_event.content)
+                        messages[:] = [ce]
+                        total_tokens = 0
+                        if self._session_manager.session_id:
+                            self._session_manager.save_context_full(messages)
 
             # 注入后台任务通知。
             if self._background_manager and background_task_agent_name:
@@ -93,21 +95,34 @@ class MainLoop:
                         f"Background task notification received (task id = {notification['background_task_id']})\ncommand: {notification['command']}\nstatus: {notification['status']}\nresult: {notification['result']}."
                         for notification in notifications
                     )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"<background-results>\n{background_task_result}\n</background-results>",
-                        }
+                    bg_msg = f"<background-results>\n{background_task_result}\n</background-results>"
+
+                    yield StreamEvent(
+                        type=EventType.BACKGROUND_NOTIFICATION,
+                        content=f"后台任务通知：\n{background_task_result}",
                     )
-                    if self._session_path:
-                        self._write_jsonl(self._session_path, messages[-1], mode="a")
+                    yield StreamEvent(
+                        type=EventType.CONTEXT_ENTRY,
+                        content=json.dumps({"role": "user", "content": bg_msg}, ensure_ascii=False),
+                    )
+                    messages.append({"role": "user", "content": bg_msg})
+                    if self._session_manager.session_id:
+                        self._session_manager.write_context(messages[-1])
 
             # 注入 lead 收件箱消息。
             inbox = self._message_bus.read_inbox("lead")
             if inbox:
+                yield StreamEvent(
+                    type=EventType.INBOX_MESSAGE,
+                    content=f"收件箱消息：\n{inbox}",
+                )
+                yield StreamEvent(
+                    type=EventType.CONTEXT_ENTRY,
+                    content=json.dumps({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"}, ensure_ascii=False),
+                )
                 messages.append({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"})
-                if self._session_path:
-                    self._write_jsonl(self._session_path, messages[-1], mode="a")
+                if self._session_manager.session_id:
+                    self._session_manager.write_context(messages[-1])
 
             with self._client.messages.stream(
                 model=self._model,
@@ -126,9 +141,19 @@ class MainLoop:
                 response = stream.get_final_message()
 
             total_tokens = response.usage.input_tokens + response.usage.output_tokens
+
+            yield StreamEvent(
+                type=EventType.TOKEN_USAGE,
+                content=f"本轮: {total_tokens} tokens (in: {response.usage.input_tokens}, out: {response.usage.output_tokens})",
+            )
+
             messages.append({"role": "assistant", "content": response.content})
-            if self._session_path:
-                self._write_jsonl(self._session_path, messages[-1], mode="a")
+            if self._session_manager.session_id:
+                self._session_manager.write_context(messages[-1])
+            yield StreamEvent(
+                type=EventType.CONTEXT_ENTRY,
+                content=json.dumps({"role": "assistant", "content": response.content}, ensure_ascii=False),
+            )
 
             if response.stop_reason != "tool_use":
                 yield StreamEvent(type=EventType.ASSISTANT_DONE, stop_reason=response.stop_reason)
@@ -150,59 +175,82 @@ class MainLoop:
 
                 handler = self._tool_handlers.get(block.name)
                 try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}."
+                    handler_output = handler(**block.input) if handler else f"Unknown tool: {block.name}."
                 except Exception as exc:
-                    output = f"Tool execution error: {exc}"
+                    handler_output = f"Tool execution error: {exc}"
 
+                if isinstance(handler_output, str):
+                    tool_result_content = handler_output
+                    sub_events: list[StreamEvent] = []
+                elif hasattr(handler_output, '__iter__'):
+                    # Generator handler（如 subagent）：收集子事件 + 最终 return 值
+                    sub_events = []
+                    final_result = ""
+                    try:
+                        for item in handler_output:
+                            if isinstance(item, StreamEvent):
+                                sub_events.append(item)
+                            else:
+                                final_result = item
+                        tool_result_content = str(final_result) if final_result else ""
+                    except Exception as exc:
+                        tool_result_content = f"Tool execution error: {exc}"
+                else:
+                    tool_result_content = str(handler_output)
+                    sub_events = []
+
+                # 转发子事件到前端子面板
+                if sub_events:
+                    yield StreamEvent(
+                        type=EventType.SUB_PANEL_ENTER,
+                        tool_id=block.id,
+                        tool_name=block.name,
+                    )
+                    yield from sub_events
+                    yield StreamEvent(
+                        type=EventType.SUB_PANEL_EXIT,
+                        tool_id=block.id,
+                    )
+
+                # 主 tool 结果
                 yield StreamEvent(
                     type=EventType.TOOL_RESULT,
                     tool_id=block.id,
-                    content=str(output),
+                    content=tool_result_content,
                 )
 
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(output),
-                    }
-                )
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": tool_result_content,
+                })
 
                 if block.name == "todo_write":
                     used_todo = True
-                    todo_agent_name = block.input.get("name", todo_agent_name)
+                    if isinstance(block.input, dict):
+                        todo_agent_name = block.input.get("name", todo_agent_name)
 
                 if block.name == "run_background_task":
-                    background_task_agent_name = block.input.get("agent_name", background_task_agent_name)
+                    if isinstance(block.input, dict):
+                        background_task_agent_name = block.input.get("agent_name", background_task_agent_name)
 
             # 连续多轮未使用 todo 工具将触发提醒（前提是存在未完成的 todo 项）。
             rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
             if todo_agent_name and self._todo_manager.has_undo_items(todo_agent_name) and rounds_without_todo >= 3:
-                # 轻提醒，避免 Todo 状态长期不更新。
+                yield StreamEvent(
+                    type=EventType.TODO_REMINDER,
+                    content="提醒：更新 todo 列表。",
+                )
+                yield StreamEvent(
+                    type=EventType.CONTEXT_ENTRY,
+                    content=json.dumps({"role": "user", "content": "<reminder>Update your todos.</reminder>"}, ensure_ascii=False),
+                )
                 results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
 
             messages.append({"role": "user", "content": results})
-            if self._session_path:
-                self._write_jsonl(self._session_path, messages[-1], mode="a")
-
-    # ======================== private ========================
-
-    def _build_session_path(self) -> Path:
-        """根据时间戳构造主代理会话文件路径。"""
-        filename = f"main_agent_{int(time.time() * 1_000_000)}.jsonl"
-        filepath = self._sessions_dir / filename
-        try:
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        return filepath
-
-    def _write_jsonl(self, filepath: Path, entry: Any, mode: str = "a") -> None:
-        """写入 JSONL 文件。entry 为单条消息或消息列表。mode="a" 追加，mode="w" 覆写。异常时仅打印警告。"""
-        entries = entry if isinstance(entry, list) else [entry]
-        try:
-            with open(filepath, mode, encoding="utf-8") as f:
-                for item in entries:
-                    f.write(json.dumps(item, default=str, ensure_ascii=False) + "\n")
-        except (OSError, TypeError) as exc:
-            print(f"[main_agent] session write failed: {exc}")
+            if self._session_manager.session_id:
+                self._session_manager.write_context(messages[-1])
+            yield StreamEvent(
+                type=EventType.CONTEXT_ENTRY,
+                content=json.dumps({"role": "user", "content": results}, ensure_ascii=False),
+            )
