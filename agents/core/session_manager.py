@@ -63,6 +63,15 @@ class SessionManager:
         else:
             self._current_turn = 0
 
+    def detach_session(self) -> None:
+        """退出当前会话（不创建新会话，不上报后端）。"""
+        self._session_id = None
+        self._session_dir = None
+        self._transcript_path = None
+        self._context_path = None
+        self._current_turn = 0
+        self._current_seq = 0
+
     @property
     def session_id(self) -> str | None:
         return self._session_id

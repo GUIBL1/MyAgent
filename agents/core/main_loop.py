@@ -39,7 +39,6 @@ class MainLoop:
         compact_threshold_pct: float,
         micro_compact_enabled: bool,
         max_output_tokens: int,
-        session_manager: Any,
     ):
         self._system_prompt = system_prompt
         self._tools = tools
@@ -54,27 +53,29 @@ class MainLoop:
         self._compact_threshold_pct = compact_threshold_pct
         self._micro_compact_enabled = micro_compact_enabled
         self._max_output_tokens = max_output_tokens
-        self._session_manager = session_manager
 
     # ======================== public ========================
 
-    def run_main_loop(self, messages: list) -> Iterator[StreamEvent]:
+    def run_main_loop(self, session: Any) -> Iterator[StreamEvent]:
         """执行主代理循环，直到模型停止发起工具调用。"""
+        messages = session.messages
+        session_manager = session.session_manager
+
         todo_agent_name = ""
         background_task_agent_name = "lead"
         rounds_without_todo = 0
         total_tokens = 0
 
         # 覆写 context.jsonl
-        if self._session_manager.session_id:
-            self._session_manager.save_context_full(messages)
+        if session_manager.session_id:
+            session_manager.save_context_full(messages)
 
         while True:
             # 每轮微压缩（受开关控制），超阈值触发全量压缩。
             if self._micro_compact_enabled:
                 yield from self._context_compression_manager.micro_compact(messages)
-                if self._session_manager.session_id:
-                    self._session_manager.save_context_full(messages)
+                if session_manager.session_id:
+                    session_manager.save_context_full(messages)
             # 全量压缩
             if total_tokens >= self._token_threshold * self._compact_threshold_pct:
                 for compact_event in self._context_compression_manager.auto_compact(messages):
@@ -84,8 +85,8 @@ class MainLoop:
                         ce = json.loads(compact_event.content)
                         messages[:] = [ce]
                         total_tokens = 0
-                        if self._session_manager.session_id:
-                            self._session_manager.save_context_full(messages)
+                        if session_manager.session_id:
+                            session_manager.save_context_full(messages)
 
             # 注入后台任务通知。
             if self._background_manager and background_task_agent_name:
@@ -103,11 +104,11 @@ class MainLoop:
                     )
                     yield StreamEvent(
                         type=EventType.CONTEXT_ENTRY,
-                        content=json.dumps({"role": "user", "content": bg_msg}, ensure_ascii=False),
+                        content=json.dumps({"role": "user", "content": bg_msg}, ensure_ascii=False, default=str),
                     )
                     messages.append({"role": "user", "content": bg_msg})
-                    if self._session_manager.session_id:
-                        self._session_manager.write_context(messages[-1])
+                    if session_manager.session_id:
+                        session_manager.write_context(messages[-1])
 
             # 注入 lead 收件箱消息。
             inbox = self._message_bus.read_inbox("lead")
@@ -118,11 +119,11 @@ class MainLoop:
                 )
                 yield StreamEvent(
                     type=EventType.CONTEXT_ENTRY,
-                    content=json.dumps({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"}, ensure_ascii=False),
+                    content=json.dumps({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"}, ensure_ascii=False, default=str),
                 )
                 messages.append({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"})
-                if self._session_manager.session_id:
-                    self._session_manager.write_context(messages[-1])
+                if session_manager.session_id:
+                    session_manager.write_context(messages[-1])
 
             with self._client.messages.stream(
                 model=self._model,
@@ -147,12 +148,13 @@ class MainLoop:
                 content=f"本轮: {total_tokens} tokens (in: {response.usage.input_tokens}, out: {response.usage.output_tokens})",
             )
 
-            messages.append({"role": "assistant", "content": response.content})
-            if self._session_manager.session_id:
-                self._session_manager.write_context(messages[-1])
+            assistant_content = [b.model_dump(exclude_none=True) for b in response.content]
+            messages.append({"role": "assistant", "content": assistant_content})
+            if session_manager.session_id:
+                session_manager.write_context(messages[-1])
             yield StreamEvent(
                 type=EventType.CONTEXT_ENTRY,
-                content=json.dumps({"role": "assistant", "content": response.content}, ensure_ascii=False),
+                content=json.dumps({"role": "assistant", "content": assistant_content}, ensure_ascii=False, default=str),
             )
 
             if response.stop_reason != "tool_use":
@@ -243,14 +245,14 @@ class MainLoop:
                 )
                 yield StreamEvent(
                     type=EventType.CONTEXT_ENTRY,
-                    content=json.dumps({"role": "user", "content": "<reminder>Update your todos.</reminder>"}, ensure_ascii=False),
+                    content=json.dumps({"role": "user", "content": "<reminder>Update your todos.</reminder>"}, ensure_ascii=False, default=str),
                 )
                 results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
 
             messages.append({"role": "user", "content": results})
-            if self._session_manager.session_id:
-                self._session_manager.write_context(messages[-1])
+            if session_manager.session_id:
+                session_manager.write_context(messages[-1])
             yield StreamEvent(
                 type=EventType.CONTEXT_ENTRY,
-                content=json.dumps({"role": "user", "content": results}, ensure_ascii=False),
+                content=json.dumps({"role": "user", "content": results}, ensure_ascii=False, default=str),
             )

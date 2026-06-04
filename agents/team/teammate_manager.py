@@ -290,7 +290,7 @@ class TeammateManager:
                     return
 
                 total_tokens = response.usage.input_tokens + response.usage.output_tokens
-                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in response.content]})
                 if session_path:
                     self._write_jsonl(session_path, messages[-1], mode="a")
 

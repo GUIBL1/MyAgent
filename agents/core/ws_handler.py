@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from agents.core.container import MyAgentApp
+from agents.core.session_manager import SessionManager
 
 
 # 不推前端的 EventType
@@ -37,7 +38,8 @@ class WsHandler:
     async def handle(self, websocket: WebSocket) -> None:
         """接受 WS 连接，进入消息循环。"""
         await websocket.accept()
-        session_manager = self._agent_app.session_manager
+        # 每连接独立 SessionManager，避免并发连接互相覆盖 session 状态
+        session_manager = SessionManager(sessions_dir=self._agent_app.main_agent_sessions_dir)
         session = WsSession(session_manager)
 
         # 推送会话列表，供前端左面板展示
@@ -65,6 +67,9 @@ class WsHandler:
                 elif msg_type == "switch_session":
                     await self._handle_switch_session(websocket, session, message.get("session_id", ""))
 
+                elif msg_type == "new_session":
+                    await self._handle_new_session(websocket, session)
+
         except WebSocketDisconnect:
             pass
 
@@ -80,10 +85,10 @@ class WsHandler:
 
         # 首次发送：创建新会话
         if not session_manager.session_id:
-            session_manager.new_session()
+            sid = session_manager.new_session()
             await websocket.send_json({
                 "type": "session_created",
-                "session_id": session_manager.session_id,
+                "session_id": sid,
             })
 
         turn = session_manager.current_turn
@@ -109,7 +114,7 @@ class WsHandler:
         buffer_type = ""  # "text" | "thinking"
 
         try:
-            for stream_event in self._agent_app.start_agent_loop(session.messages):
+            for stream_event in self._agent_app.start_agent_loop(session):
                 d = stream_event.to_dict()
                 event_type = d["type"]
 
@@ -163,8 +168,13 @@ class WsHandler:
 
                 await asyncio.sleep(0)
 
+        except WebSocketDisconnect:
+            return
         except Exception as exc:
-            await websocket.send_json({"type": "error", "error_msg": str(exc)})
+            try:
+                await websocket.send_json({"type": "error", "error_msg": str(exc)})
+            except Exception:
+                pass
             return
 
         # flush 最后缓冲区
@@ -175,13 +185,12 @@ class WsHandler:
 
         # 推进 turn + 推送最新会话列表
         session_manager.advance_turn()
-        await self._push_session_list(websocket)
+        await self._push_session_list(websocket, session_manager)
 
     # ---- 推送 ----
 
-    async def _push_session_list(self, websocket: WebSocket) -> None:
+    async def _push_session_list(self, websocket: WebSocket, session_manager: Any) -> None:
         """推送最新会话列表到前端左面板。"""
-        session_manager = self._agent_app.session_manager
         await websocket.send_json({
             "type": "session_list", "sessions": session_manager.list_sessions(),
         })
@@ -213,7 +222,7 @@ class WsHandler:
             "session_id": session_manager.session_id,
             "transcript": session_manager.load_transcript(),
         })
-        await self._push_session_list(websocket)
+        await self._push_session_list(websocket, session_manager)
 
     async def _handle_switch_session(self, websocket: WebSocket, session: WsSession, session_id: str) -> None:
         """切换到指定会话，加载历史 context 和 transcript 推送给前端。"""
@@ -233,4 +242,15 @@ class WsHandler:
             "session_id": session_id,
             "transcript": session_manager.load_transcript(),
         })
-        await self._push_session_list(websocket)
+        await self._push_session_list(websocket, session_manager)
+
+    async def _handle_new_session(self, websocket: WebSocket, session: WsSession) -> None:
+        """退出当前会话，清空状态，等待用户发送消息时再创建会话。"""
+        session_manager = session.session_manager
+        session_manager.detach_session()
+        session.messages = []
+        await websocket.send_json({
+            "type": "session_state",
+            "session_id": None,
+            "transcript": [],
+        })

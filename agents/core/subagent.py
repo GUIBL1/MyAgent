@@ -79,7 +79,7 @@ class SubAgent:
                 if total_tokens >= self._token_threshold * self._compact_threshold_pct:
                     for compact_event in self._context_compression_manager.auto_compact(messages):
                         if compact_event.event_type == EventType.CONTEXT_ENTRY:
-                            messages[:] = [json.loads(compact_event._content)]
+                            messages[:] = [json.loads(compact_event.content)]
                             total_tokens = 0
                         else:
                             yield compact_event
@@ -120,7 +120,7 @@ class SubAgent:
                 content=f"本轮: {total_tokens} tokens (in: {response.usage.input_tokens}, out: {response.usage.output_tokens})",
             )
 
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in response.content]})
 
             if response.stop_reason != "tool_use":
                 yield StreamEvent(type=EventType.ASSISTANT_DONE)
