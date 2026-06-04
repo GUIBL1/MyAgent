@@ -1,4 +1,4 @@
-import { ref, nextTick, type Ref } from 'vue'
+import { ref, type Ref } from 'vue'
 
 export interface ChatMessage {
   role: 'user' | 'assistant'
@@ -11,10 +11,33 @@ export type MessageBlock =
   | { type: 'thinking'; content: string; active: boolean }
   | { type: 'tool'; id: string; name: string; input: Record<string, unknown>; status: 'running' | 'done'; result?: string }
 
+export interface SessionInfo {
+  session_id: string
+  title: string
+  turns: number
+  created_at: string
+  updated_at: string
+}
+
+// 单例：确保所有组件共享同一个 WebSocket 连接和状态
+let _instance: ReturnType<typeof _createChat> | null = null
+
 export function useChat() {
+  if (!_instance) {
+    _instance = _createChat()
+  }
+  return _instance
+}
+
+function _createChat() {
   const messages: Ref<ChatMessage[]> = ref([])
   const isStreaming = ref(false)
   const wsStatus = ref<'disconnected' | 'connecting' | 'connected'>('disconnected')
+
+  // 会话管理
+  const sessions: Ref<SessionInfo[]> = ref([])
+  const currentSessionId: Ref<string | null> = ref(null)
+  const hasSession = ref(false) // 是否有活跃会话（已发送过消息）
 
   let ws: WebSocket | null = null
 
@@ -25,7 +48,6 @@ export function useChat() {
 
     const lastBlock = last.blocks[last.blocks.length - 1]
 
-    // 类型切换时，标记上一个 thinking 块为非活跃（自动折叠）
     if (lastBlock && lastBlock.type !== type && lastBlock.type === 'thinking') {
       lastBlock.active = false
     }
@@ -55,9 +77,32 @@ export function useChat() {
     }
   }
 
-  // ---- 事件分发：收到即写，不缓冲 ----
+  // ---- 事件分发 ----
   function handleEvent(data: any) {
     const type = data.type as string
+
+    // === 会话管理事件 ===
+
+    if (type === 'session_list') {
+      sessions.value = data.sessions || []
+      return
+    }
+
+    if (type === 'session_created') {
+      currentSessionId.value = data.session_id
+      hasSession.value = true
+      return
+    }
+
+    if (type === 'session_state') {
+      currentSessionId.value = data.session_id
+      hasSession.value = !!data.session_id
+      messages.value = rebuildFromTranscript(data.transcript || [])
+      isStreaming.value = false
+      return
+    }
+
+    // === 对话事件 ===
 
     if (type === 'text') {
       if (isStreaming.value) _applyDelta('text', data.delta)
@@ -67,7 +112,6 @@ export function useChat() {
       if (isStreaming.value) {
         const last = messages.value[messages.value.length - 1]
         if (last?.role === 'assistant') {
-          // 上一个 thinking 块结束 → 折叠
           const lastBlock = last.blocks[last.blocks.length - 1]
           if (lastBlock?.type === 'thinking') lastBlock.active = false
 
@@ -75,7 +119,6 @@ export function useChat() {
             type: 'tool', id: data.tool_id, name: data.tool_name,
             input: data.tool_input ?? {}, status: 'running',
           })
-          nextTick()
         }
       }
     } else if (type === 'tool_result') {
@@ -97,7 +140,6 @@ export function useChat() {
       messages.value.push({ role: 'assistant', content: '', blocks: [] })
       isStreaming.value = true
     } else if (type === 'assistant_done') {
-      // 结束所有 thinking 块
       const lastDone = messages.value[messages.value.length - 1]
       if (lastDone?.role === 'assistant') {
         for (const b of lastDone.blocks) {
@@ -123,5 +165,132 @@ export function useChat() {
     ws.send(JSON.stringify({ type: 'send', content }))
   }
 
-  return { messages, isStreaming, wsStatus, connect, send }
+  // ---- 会话操作 ----
+  function switchSession(sessionId: string) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (isStreaming.value) return
+    messages.value = []
+    ws.send(JSON.stringify({ type: 'switch_session', session_id: sessionId }))
+  }
+
+  function newSession() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (isStreaming.value) return
+    messages.value = []
+    isStreaming.value = false
+    currentSessionId.value = null
+    hasSession.value = false
+    ws.send(JSON.stringify({ type: 'new_session' }))
+  }
+
+  function rewindToTurn(turn: number) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'rewind', turn }))
+  }
+
+  // ---- 从 transcript 重建历史消息 ----
+  function rebuildFromTranscript(transcript: any[]): ChatMessage[] {
+    const rebuilt: ChatMessage[] = []
+    let curAssistant: ChatMessage | null = null
+
+    for (const entry of transcript) {
+      const et = entry.type as string
+
+      // 用户消息 → 创建 user ChatMessage
+      if (et === 'user_message') {
+        curAssistant = null
+        rebuilt.push({ role: 'user', content: entry.content || '', blocks: [] })
+        continue
+      }
+
+      // 上下文入口 / 统计信息 → 跳过
+      if (et === 'context_entry' || et === 'token_usage' || et === 'context_patch') {
+        continue
+      }
+
+      // thought / text / tool_start → 需要 assistant 容器
+      if (et === 'thinking' || et === 'text' || et === 'tool_start') {
+        if (!curAssistant) {
+          curAssistant = { role: 'assistant', content: '', blocks: [] }
+          rebuilt.push(curAssistant)
+        }
+
+        if (et === 'thinking') {
+          curAssistant.blocks.push({
+            type: 'thinking',
+            content: entry.content || '',
+            active: false, // 历史思考默认折叠
+          })
+        } else if (et === 'text') {
+          curAssistant.blocks.push({
+            type: 'text',
+            content: entry.content || '',
+          })
+        } else if (et === 'tool_start') {
+          curAssistant.blocks.push({
+            type: 'tool',
+            id: entry.tool_id || '',
+            name: entry.tool_name || '',
+            input: entry.tool_input ?? {},
+            status: 'running',
+          })
+        }
+        continue
+      }
+
+      // tool_result → 更新匹配的 tool block
+      if (et === 'tool_result') {
+        if (curAssistant) {
+          // 逆序查找最后一个匹配的 tool block（同 tool_use_id 可能有多个 subagent 调用）
+          let idx = -1
+          for (let i = curAssistant.blocks.length - 1; i >= 0; i--) {
+            const b = curAssistant.blocks[i]
+            if (b.type === 'tool' && b.id === entry.tool_id) {
+              idx = i
+              break
+            }
+          }
+          if (idx !== -1) {
+            const block = curAssistant.blocks[idx] as Extract<MessageBlock, { type: 'tool' }>
+            curAssistant.blocks.splice(idx, 1, {
+              ...block,
+              status: 'done',
+              result: entry.content || '',
+            })
+          }
+        }
+        continue
+      }
+
+      // assistant_done → 折叠全部 thinking
+      if (et === 'assistant_done') {
+        if (curAssistant) {
+          for (const b of curAssistant.blocks) {
+            if (b.type === 'thinking') b.active = false
+          }
+        }
+        curAssistant = null
+        continue
+      }
+
+      // error → 追加文本块
+      if (et === 'error') {
+        if (!curAssistant) {
+          curAssistant = { role: 'assistant', content: '', blocks: [] }
+          rebuilt.push(curAssistant)
+        }
+        curAssistant.blocks.push({
+          type: 'text',
+          content: `\n❌ ${entry.error_msg || entry.content || '未知错误'}`,
+        })
+        continue
+      }
+
+      // sub_panel_enter / sub_panel_exit / background_notification / todo_reminder / auto_compact_* → 忽略
+    }
+
+    return rebuilt
+  }
+
+  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, connect, send, switchSession, newSession, rewindToTurn }
 }

@@ -13,9 +13,10 @@ const emit = defineEmits<{
   (e: 'toggle-right'): void
 }>()
 
-const { messages, isStreaming, wsStatus, connect, send } = useChat()
+const { messages, isStreaming, wsStatus, hasSession, connect, send } = useChat()
 const input = ref('')
 const chatEl = ref<HTMLElement | null>(null)
+const inputEl = ref<HTMLTextAreaElement | null>(null)
 
 onMounted(() => connect())
 
@@ -46,6 +47,18 @@ function handleSend() {
   autoScroll = true
   send(text)
   input.value = ''
+  nextTick(() => {
+    if (inputEl.value) inputEl.value.style.height = 'auto'
+  })
+}
+
+function autoResize() {
+  const el = inputEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+  // 输入框增高时，消息区跟着上滚，保持最后一条可见
+  scrollToBottom()
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -105,7 +118,7 @@ function mdHtml(text: string): string {
     <!-- 消息列表 -->
     <div class="chat-messages" ref="chatEl" @scroll="onScroll">
       <div v-if="messages.length === 0" class="empty-hint">
-        输入消息开始与 Lead Agent 对话
+        {{ hasSession ? '输入消息继续对话' : '输入消息开始新会话，或从左侧选择已有会话' }}
       </div>
 
       <div
@@ -168,10 +181,12 @@ function mdHtml(text: string): string {
     <div class="chat-input-area">
       <div class="input-row">
         <textarea
+          ref="inputEl"
           v-model="input"
           :disabled="isStreaming"
           placeholder="输入消息… Enter 发送"
           rows="1"
+          @input="autoResize"
           @keydown="handleKeydown"
         ></textarea>
         <button :disabled="isStreaming" class="btn-send" @click="handleSend">发送</button>
@@ -191,14 +206,16 @@ function mdHtml(text: string): string {
 /* ======================== Header ======================== */
 .chat-header {
   display: flex; align-items: center; justify-content: space-between;
-  margin: 12px 20px 0;
+  position: relative; z-index: 10;
+  margin: 12px 20px -6px;
   padding: 10px 18px;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  flex-shrink: 0;
   background: var(--glass);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 .header-left, .header-right {
   display: flex; align-items: center; gap: 10px;
@@ -233,7 +250,8 @@ function mdHtml(text: string): string {
 
 /* ======================== Messages ======================== */
 .chat-messages {
-  flex: 1; overflow-y: auto; padding: 28px 24px;
+  flex: 1; overflow-y: auto;
+  padding: 34px 24px 34px;
   display: flex; flex-direction: column; gap: 24px;
   scroll-behavior: smooth;
 }
@@ -437,13 +455,16 @@ function mdHtml(text: string): string {
 
 /* ======================== Input ======================== */
 .chat-input-area {
-  margin: 0 20px 12px;
+  position: relative; z-index: 10;
+  margin: -6px 20px 12px;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  padding: 14px 18px; flex-shrink: 0;
+  padding: 14px 18px;
   background: var(--glass);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 .input-row { display: flex; gap: 10px; align-items: flex-end; }
 textarea {
@@ -457,8 +478,17 @@ textarea {
   font-size: 14px; line-height: 1.6;
   resize: none; outline: none;
   min-height: 44px; max-height: 160px;
+  overflow-x: hidden; overflow-y: auto;
+  word-break: break-word; white-space: pre-wrap;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
+textarea::-webkit-scrollbar { width: 5px; }
+textarea::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 6px 0;
+}
+textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+textarea::-webkit-scrollbar-thumb:hover { background: #D4C4AD; }
 textarea:focus {
   border-color: var(--amber);
   box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.1);
@@ -480,7 +510,10 @@ textarea::placeholder { color: var(--fg-muted); }
 
 /* ======================== Scrollbar ======================== */
 .chat-messages::-webkit-scrollbar { width: 5px; }
-.chat-messages::-webkit-scrollbar-track { background: transparent; }
+.chat-messages::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 8px 0;
+}
 .chat-messages::-webkit-scrollbar-thumb {
   background: var(--border); border-radius: 10px;
 }

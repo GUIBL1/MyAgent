@@ -36,7 +36,7 @@ const emit = defineEmits<{
   -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  margin: 12px 8px 12px;
+  margin: 0 8px;
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -65,6 +65,14 @@ const emit = defineEmits<{
 
 .panel-body {
   flex: 1; overflow-y: auto;
-  padding: 16px;
+  padding: 8px 16px;
 }
+
+.panel-body::-webkit-scrollbar { width: 5px; }
+.panel-body::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 8px 0;
+}
+.panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+.panel-body::-webkit-scrollbar-thumb:hover { background: #D4C4AD; }
 </style>

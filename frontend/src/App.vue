@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue'
+import { useChat } from './composables/useChat'
 import ChatView from './components/ChatView.vue'
 import SidePanel from './components/SidePanel.vue'
+import SessionList from './components/SessionList.vue'
+
+const { sessions, currentSessionId, isStreaming, switchSession, newSession } = useChat()
 
 const showLeft = ref(false)
 const showRight = ref(false)
@@ -39,7 +43,7 @@ onUnmounted(() => stopDrag())
 
 <template>
   <div class="app-shell">
-    <!-- Left Panel -->
+    <!-- Left Panel: Session List -->
     <SidePanel
       v-if="showLeft"
       side="left"
@@ -47,7 +51,13 @@ onUnmounted(() => stopDrag())
       title="会话"
       @close="showLeft = false"
     >
-      <div class="placeholder">会话列表（占位）</div>
+      <SessionList
+        :sessions="sessions"
+        :current-session-id="currentSessionId"
+        :streaming="isStreaming"
+        @select="switchSession"
+        @new-session="newSession"
+      />
     </SidePanel>
 
     <!-- Left Resize Handle -->
@@ -76,7 +86,7 @@ onUnmounted(() => stopDrag())
       @mousedown="startDrag('right', $event)"
     ></div>
 
-    <!-- Right Panel -->
+    <!-- Right Panel: Status -->
     <SidePanel
       v-if="showRight"
       side="right"
@@ -95,6 +105,7 @@ onUnmounted(() => stopDrag())
   height: 100vh; width: 100vw;
   background: var(--bg);
   overflow: hidden;
+  padding: 12px 4px;
 }
 
 .center-area {
