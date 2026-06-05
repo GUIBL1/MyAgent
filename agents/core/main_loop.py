@@ -100,7 +100,7 @@ class MainLoop:
 
                     yield StreamEvent(
                         type=EventType.BACKGROUND_NOTIFICATION,
-                        content=f"后台任务通知：\n{background_task_result}",
+                        content=background_task_result,
                     )
                     yield StreamEvent(
                         type=EventType.CONTEXT_ENTRY,
@@ -115,7 +115,7 @@ class MainLoop:
             if inbox:
                 yield StreamEvent(
                     type=EventType.INBOX_MESSAGE,
-                    content=f"收件箱消息：\n{inbox}",
+                    content=inbox,
                 )
                 yield StreamEvent(
                     type=EventType.CONTEXT_ENTRY,
@@ -241,7 +241,7 @@ class MainLoop:
             if todo_agent_name and self._todo_manager.has_undo_items(todo_agent_name) and rounds_without_todo >= 3:
                 yield StreamEvent(
                     type=EventType.TODO_REMINDER,
-                    content="提醒：更新 todo 列表。",
+                    content="Update your todos.",
                 )
                 yield StreamEvent(
                     type=EventType.CONTEXT_ENTRY,

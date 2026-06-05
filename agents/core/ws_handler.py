@@ -16,7 +16,7 @@ from agents.core.session_manager import SessionManager
 _NON_RENDER_TYPES = {"context_entry", "context_patch"}
 
 # 需要在 ws_handler 中 delta 缓冲合并的类型
-_DELTA_TYPES = {"text", "thinking"}
+_DELTA_TYPES = {"text", "thinking", "auto_compact_thinking", "auto_compact_text"}
 
 
 class WsSession:
@@ -111,7 +111,9 @@ class WsHandler:
         # 3) 启动 agent，缓冲 delta + 写入 transcript
         text_buffer = ""
         thinking_buffer = ""
-        buffer_type = ""  # "text" | "thinking"
+        auto_compact_thinking_buffer = ""
+        auto_compact_text_buffer = ""
+        buffer_type = ""  # "text" | "thinking" | "auto_compact_thinking" | "auto_compact_text"
 
         try:
             for stream_event in self._agent_app.start_agent_loop(session):
@@ -119,35 +121,47 @@ class WsHandler:
                 event_type = d["type"]
 
                 if event_type in _DELTA_TYPES:
-                    # 类型切换 → flush 缓冲
+                    # 类型切换 → flush 旧缓冲
                     if buffer_type and buffer_type != event_type:
-                        self._flush_buffer(
-                            session_manager, turn, buffer_type, text_buffer if "text" in buffer_type else thinking_buffer,
-                        )
-                        if "text" in buffer_type:
-                            text_buffer = ""
-                        else:
-                            thinking_buffer = ""
+                        prev_buf = {
+                            "text": text_buffer,
+                            "thinking": thinking_buffer,
+                            "auto_compact_thinking": auto_compact_thinking_buffer,
+                            "auto_compact_text": auto_compact_text_buffer
+                        }.get(buffer_type, "")
+                        if prev_buf:
+                            self._flush_buffer(session_manager, turn, buffer_type, prev_buf)
+
+                        if buffer_type == "text": text_buffer = ""
+                        elif buffer_type == "thinking": thinking_buffer = ""
+                        elif buffer_type == "auto_compact_thinking": auto_compact_thinking_buffer = ""
+                        elif buffer_type == "auto_compact_text": auto_compact_text_buffer = ""
 
                     delta = d.get("delta", "")
-                    if "text" in event_type:
+                    if event_type == "text":
                         text_buffer += delta
-                        buffer_type = event_type
-                    else:
+                    elif event_type == "thinking":
                         thinking_buffer += delta
-                        buffer_type = event_type
+                    elif event_type == "auto_compact_thinking":
+                        auto_compact_thinking_buffer += delta
+                    elif event_type == "auto_compact_text":
+                        auto_compact_text_buffer += delta
+                    buffer_type = event_type
 
                     # 推 WebSocket（逐 delta 实时渲染）
                     await websocket.send_json(d)
 
                 else:
-                    # 非 delta 事件 → flush 缓冲
-                    if text_buffer:
-                        self._flush_buffer(session_manager, turn, "text", text_buffer)
-                        text_buffer = ""
-                    if thinking_buffer:
-                        self._flush_buffer(session_manager, turn, "thinking", thinking_buffer)
-                        thinking_buffer = ""
+                    # 非 delta 事件 → flush 全部缓冲
+                    for buffer_type, buffer in (
+                        ("text", text_buffer),
+                        ("thinking", thinking_buffer),
+                        ("auto_compact_thinking", auto_compact_thinking_buffer),
+                        ("auto_compact_text", auto_compact_text_buffer)
+                    ):
+                        if buffer:
+                            self._flush_buffer(session_manager, turn, buffer_type, buffer)
+                    text_buffer = thinking_buffer = auto_compact_thinking_buffer = auto_compact_text_buffer = ""
                     buffer_type = ""
 
                     # 写 transcript
@@ -178,10 +192,14 @@ class WsHandler:
             return
 
         # flush 最后缓冲区
-        if text_buffer:
-            self._flush_buffer(session_manager, turn, "text", text_buffer)
-        if thinking_buffer:
-            self._flush_buffer(session_manager, turn, "thinking", thinking_buffer)
+        for buffer_type, buffer in (
+            ("text", text_buffer),
+            ("thinking", thinking_buffer),
+            ("auto_compact_thinking", auto_compact_thinking_buffer),
+            ("auto_compact_text", auto_compact_text_buffer)
+        ):
+            if buffer:
+                self._flush_buffer(session_manager, turn, buffer_type, buffer)
 
         # 推进 turn + 推送最新会话列表
         session_manager.advance_turn()

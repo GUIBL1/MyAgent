@@ -80,7 +80,7 @@ class ContextCompressionManager:
 
         yield StreamEvent(
             type=EventType.MICRO_COMPACT,
-            content=f"清理了 {cleared_count} 个旧工具结果，保留最近 {self._microcompact_tool_result_retention} 个",
+            content=f"已移除 {cleared_count} 条旧 tool result · 保留最近 {self._microcompact_tool_result_retention} 轮",
         )
 
         if patches:
@@ -104,7 +104,7 @@ class ContextCompressionManager:
 
         yield StreamEvent(
             type=EventType.AUTO_COMPACT_START,
-            content=f"上下文接近上限 ({len(messages)} 条消息)，正在生成摘要…",
+            content=f"上下文接近上限 · {len(messages)} 条消息 · 正在生成摘要",
         )
 
         try:
@@ -134,7 +134,7 @@ class ContextCompressionManager:
                 yield StreamEvent(type=EventType.AUTO_COMPACT_DONE, content="压缩失败：摘要为空")
                 return
 
-            yield StreamEvent(type=EventType.AUTO_COMPACT_DONE, content="压缩成功")
+            yield StreamEvent(type=EventType.AUTO_COMPACT_DONE, content="压缩完成")
             compact_msg = {"role": "user", "content": summary}
             yield StreamEvent(
                 type=EventType.CONTEXT_ENTRY,

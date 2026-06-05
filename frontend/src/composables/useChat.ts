@@ -10,6 +10,11 @@ export type MessageBlock =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string; active: boolean }
   | { type: 'tool'; id: string; name: string; input: Record<string, unknown>; status: 'running' | 'done'; result?: string }
+  | { type: 'micro_compact'; content: string }
+  | { type: 'auto_compact'; content: string; thinking: string; summary: string; compactStatus: 'running' | 'done'; result?: string }
+  | { type: 'background_notification'; content: string }
+  | { type: 'inbox_message'; content: string }
+  | { type: 'todo_reminder'; content: string }
 
 export interface SessionInfo {
   session_id: string
@@ -41,10 +46,17 @@ function _createChat() {
 
   let ws: WebSocket | null = null
 
+  function _lastAssistant(): ChatMessage | undefined {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      if (messages.value[i].role === 'assistant') return messages.value[i]
+    }
+    return undefined
+  }
+
   function _applyDelta(type: 'text' | 'thinking', delta: string) {
     if (!isStreaming.value) return
-    const last = messages.value[messages.value.length - 1]
-    if (!last || last.role !== 'assistant') return
+    const last = _lastAssistant()
+    if (!last) return
 
     const lastBlock = last.blocks[last.blocks.length - 1]
 
@@ -110,11 +122,10 @@ function _createChat() {
       if (isStreaming.value) _applyDelta('thinking', data.delta)
     } else if (type === 'tool_start') {
       if (isStreaming.value) {
-        const last = messages.value[messages.value.length - 1]
-        if (last?.role === 'assistant') {
+        const last = _lastAssistant()
+        if (last) {
           const lastBlock = last.blocks[last.blocks.length - 1]
           if (lastBlock?.type === 'thinking') lastBlock.active = false
-
           last.blocks.push({
             type: 'tool', id: data.tool_id, name: data.tool_name,
             input: data.tool_input ?? {}, status: 'running',
@@ -123,8 +134,8 @@ function _createChat() {
       }
     } else if (type === 'tool_result') {
       if (isStreaming.value) {
-        const last = messages.value[messages.value.length - 1]
-        if (last?.role === 'assistant') {
+        const last = _lastAssistant()
+        if (last) {
           const idx = last.blocks.findIndex(
             (b) => b.type === 'tool' && b.id === data.tool_id
           )
@@ -140,20 +151,66 @@ function _createChat() {
       messages.value.push({ role: 'assistant', content: '', blocks: [] })
       isStreaming.value = true
     } else if (type === 'assistant_done') {
-      const lastDone = messages.value[messages.value.length - 1]
-      if (lastDone?.role === 'assistant') {
-        for (const b of lastDone.blocks) {
+      const last = _lastAssistant()
+      if (last) {
+        for (const b of last.blocks) {
           if (b.type === 'thinking') b.active = false
         }
       }
       isStreaming.value = false
     } else if (type === 'error') {
       if (isStreaming.value) {
-        const last = messages.value[messages.value.length - 1]
-        if (last?.role === 'assistant') {
+        const last = _lastAssistant()
+        if (last) {
           last.blocks.push({ type: 'text', content: `\n❌ ${data.error_msg}` } as MessageBlock)
         }
         isStreaming.value = false
+      }
+
+    // === 状态事件 — 作为 block 插入当前 assistant 消息 ===
+
+    } else if (type === 'micro_compact') {
+      const last = _lastAssistant()
+      if (last) last.blocks.push({ type: 'micro_compact', content: data.content || '' })
+
+    } else if (type === 'inbox_message') {
+      const last = _lastAssistant()
+      if (last) last.blocks.push({ type: 'inbox_message', content: data.content || '' })
+
+    } else if (type === 'background_notification') {
+      const last = _lastAssistant()
+      if (last) last.blocks.push({ type: 'background_notification', content: data.content || '' })
+
+    } else if (type === 'todo_reminder') {
+      const last = _lastAssistant()
+      if (last) last.blocks.push({ type: 'todo_reminder', content: data.content || '' })
+
+    } else if (type === 'auto_compact_start') {
+      const last = _lastAssistant()
+      if (last) last.blocks.push({ type: 'auto_compact', content: data.content || '', thinking: '', summary: '', compactStatus: 'running' })
+
+    } else if (type === 'auto_compact_thinking') {
+      const last = _lastAssistant()
+      if (last) {
+        const ac = last.blocks[last.blocks.length - 1]
+        if (ac?.type === 'auto_compact') ac.thinking += (data.delta || '')
+      }
+
+    } else if (type === 'auto_compact_text') {
+      const last = _lastAssistant()
+      if (last) {
+        const ac = last.blocks[last.blocks.length - 1]
+        if (ac?.type === 'auto_compact') ac.summary += (data.delta || '')
+      }
+
+    } else if (type === 'auto_compact_done') {
+      const last = _lastAssistant()
+      if (last) {
+        const ac = last.blocks[last.blocks.length - 1]
+        if (ac?.type === 'auto_compact') {
+          ac.compactStatus = 'done'
+          if (data.content) ac.result = data.content
+        }
       }
     }
   }
@@ -200,6 +257,59 @@ function _createChat() {
       if (et === 'user_message') {
         curAssistant = null
         rebuilt.push({ role: 'user', content: entry.content || '', blocks: [] })
+        continue
+      }
+
+      // 状态事件 → 作为 block 插入当前 assistant 消息
+      if (et === 'micro_compact') {
+        if (curAssistant) curAssistant.blocks.push({ type: 'micro_compact', content: entry.content || '' })
+        continue
+      }
+
+      if (et === 'inbox_message') {
+        if (curAssistant) curAssistant.blocks.push({ type: 'inbox_message', content: entry.content || '' })
+        continue
+      }
+
+      if (et === 'background_notification') {
+        if (curAssistant) curAssistant.blocks.push({ type: 'background_notification', content: entry.content || '' })
+        continue
+      }
+
+      if (et === 'todo_reminder') {
+        if (curAssistant) curAssistant.blocks.push({ type: 'todo_reminder', content: entry.content || '' })
+        continue
+      }
+
+      if (et === 'auto_compact_start') {
+        if (curAssistant) curAssistant.blocks.push({ type: 'auto_compact', content: entry.content || '', thinking: '', summary: '', compactStatus: 'running' })
+        continue
+      }
+
+      if (et === 'auto_compact_thinking') {
+        if (curAssistant) {
+          const ac = curAssistant.blocks[curAssistant.blocks.length - 1]
+          if (ac?.type === 'auto_compact') ac.thinking += (entry.content || '')
+        }
+        continue
+      }
+
+      if (et === 'auto_compact_text') {
+        if (curAssistant) {
+          const ac = curAssistant.blocks[curAssistant.blocks.length - 1]
+          if (ac?.type === 'auto_compact') ac.summary += (entry.content || '')
+        }
+        continue
+      }
+
+      if (et === 'auto_compact_done') {
+        if (curAssistant) {
+          const ac = curAssistant.blocks[curAssistant.blocks.length - 1]
+          if (ac?.type === 'auto_compact') {
+            ac.compactStatus = 'done'
+            if (entry.content) ac.result = entry.content
+          }
+        }
         continue
       }
 

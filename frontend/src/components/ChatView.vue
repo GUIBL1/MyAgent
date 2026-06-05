@@ -149,7 +149,7 @@ function mdHtml(text: string): string {
                 <summary class="tool-header">
                   <span class="tool-dot"></span>
                   <code>{{ block.name }}</code>
-                  <span class="tool-meta">{{ block.status === 'running' ? '执行中…' : '完成' }}</span>
+                  <span class="tool-meta" :class="block.status">{{ block.status === 'running' ? '执行中…' : '完成' }}</span>
                 </summary>
                 <div class="tool-body">
                   <div class="tool-input"><pre>{{ JSON.stringify(block.input, null, 2) }}</pre></div>
@@ -166,6 +166,74 @@ function mdHtml(text: string): string {
               class="message-text md-body"
               v-html="mdHtml(block.content)"
             ></div>
+
+            <!-- Micro Compact 块 -->
+            <div v-else-if="block.type === 'micro_compact'" class="status-card micro-card">
+              <details>
+                <summary>
+                  <span class="status-dot"></span>
+                  <span>MICRO COMPACT</span>
+                </summary>
+                <div class="status-card-body">{{ block.content }}</div>
+              </details>
+            </div>
+
+            <!-- Inbox Message 块 -->
+            <div v-else-if="block.type === 'inbox_message'" class="status-card inbox-card">
+              <details open>
+                <summary>
+                  <span class="status-dot"></span>
+                  <span>收件箱 INBOX</span>
+                </summary>
+                <div class="status-card-body">{{ block.content }}</div>
+              </details>
+            </div>
+
+            <!-- Background Notification 块 -->
+            <div v-else-if="block.type === 'background_notification'" class="status-card bg-card">
+              <details open>
+                <summary>
+                  <span class="status-dot done"></span>
+                  <span>后台任务通知</span>
+                </summary>
+                <div class="status-card-body"><pre>{{ block.content }}</pre></div>
+              </details>
+            </div>
+
+            <!-- Todo Reminder 块 -->
+            <div v-else-if="block.type === 'todo_reminder'" class="todo-reminder-block">
+              <span class="todo-icon-svg">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="1" y="2" width="12" height="10" rx="2"/>
+                  <path d="M4 7l2 2 4-4"/>
+                </svg>
+              </span>
+              <span><span class="todo-sys-label">SYSTEM</span> {{ block.content }}</span>
+            </div>
+
+            <!-- Auto Compact 块 -->
+            <div v-else-if="block.type === 'auto_compact'" class="status-card compact-card" :class="{ done: block.compactStatus === 'done' }">
+              <details open>
+                <summary>
+                  <span class="status-dot" :class="block.compactStatus === 'done' ? 'done' : 'running'"></span>
+                  <span>上下文压缩 Auto Compact</span>
+                  <span class="compact-badge">{{ block.compactStatus === 'done' ? '完成' : '进行中…' }}</span>
+                </summary>
+                <div class="status-card-body">
+                  <div v-if="block.content" class="compact-start-msg">{{ block.content }}</div>
+                  <div v-if="block.thinking" class="compact-thinking">
+                    <div class="compact-label">Thinking</div>
+                    <div class="compact-thinking-text">{{ block.thinking }}</div>
+                  </div>
+                  <div v-if="block.summary" class="compact-summary">
+                    <div class="compact-label">Summary</div>
+                    <div class="compact-summary-text">{{ block.summary }}</div>
+                  </div>
+                  <div v-if="block.result" class="compact-done-msg">{{ block.result }}</div>
+                  <span v-if="block.compactStatus === 'running'" class="compact-cursor">|</span>
+                </div>
+              </details>
+            </div>
           </template>
 
           <!-- 流式光标（跟在最后一个文本块后面） -->
@@ -369,18 +437,32 @@ function mdHtml(text: string): string {
 /* ======================== Thinking Block ======================== */
 .thinking {
   margin: 8px 0;
-  background: var(--amber-ghost);
+  background: var(--c-think-subtle);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--amber);
+  border-left: 3px solid var(--c-think);
   border-radius: var(--radius-md); overflow: hidden;
 }
 .thinking summary {
+  display: flex; align-items: center; gap: 6px;
   padding: 8px 14px; cursor: pointer;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.05em;
-  color: var(--amber);
-  user-select: none;
+  color: var(--c-think);
+  user-select: none; list-style: none;
+}
+.thinking summary::-webkit-details-marker { display: none; }
+.thinking summary::before {
+  content: '';
+  display: inline-block; flex-shrink: 0;
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--c-think);
+  transition: transform 0.15s ease;
+}
+.thinking details[open] > summary::before {
+  transform: rotate(180deg);
 }
 .thinking-content {
   padding: 8px 14px 14px;
@@ -404,6 +486,7 @@ function mdHtml(text: string): string {
   margin: 8px 0;
   background: var(--surface-hover);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--c-tool);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
@@ -420,22 +503,36 @@ function mdHtml(text: string): string {
   list-style: none;
 }
 .tool-header::-webkit-details-marker { display: none; }
+.tool-header::before {
+  content: '';
+  display: inline-block; flex-shrink: 0;
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--c-tool);
+  transition: transform 0.15s ease;
+}
+.tool-call details[open] > .tool-header::before {
+  transform: rotate(180deg);
+}
 .tool-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  background: var(--amber);
+  background: var(--c-tool);
 }
 .tool-call.done .tool-dot { background: var(--green); }
 .tool-header code {
   font-family: 'JetBrains Mono', monospace;
-  color: var(--amber); font-size: 11px;
+  color: var(--c-tool); font-size: 11px;
 }
 .tool-meta {
   margin-left: auto;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 10px; font-weight: 500;
   text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--fg-muted);
+  padding: 2px 8px; border-radius: 10px;
 }
+.tool-meta.running { color: var(--c-tool); background: var(--c-tool-subtle); }
+.tool-meta.done    { color: var(--green); background: var(--green-subtle); }
 .tool-input pre, .tool-result pre {
   padding: 10px 14px; margin: 0;
   font-size: 12px; color: var(--fg-secondary);
@@ -507,6 +604,146 @@ textarea::placeholder { color: var(--fg-muted); }
 .btn-send:hover  { background: var(--amber-hover); }
 .btn-send:active { transform: scale(0.97); }
 .btn-send:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+/* ======================== Status Events ======================== */
+
+/* Shared collapsible status card */
+.status-card {
+  margin: 8px 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  font-size: 13px; line-height: 1.6;
+}
+.status-card summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  user-select: none; list-style: none;
+}
+.status-card summary::-webkit-details-marker { display: none; }
+
+/* 三角标 */
+.status-card summary::before {
+  content: '';
+  display: inline-block; flex-shrink: 0;
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform 0.15s ease;
+}
+.status-card details[open] > summary::before { transform: rotate(180deg); }
+
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--fg-muted);
+}
+.status-dot.running { background: var(--c-compact); }
+.status-dot.done { background: var(--green); }
+.status-card-body {
+  padding: 0 14px 12px;
+  color: var(--fg-secondary);
+  white-space: pre-wrap; word-break: break-word;
+  border-top: 1px solid var(--border-light);
+}
+.status-card-body pre {
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm); padding: 10px 14px;
+  color: var(--fg-secondary); white-space: pre-wrap; word-break: break-word;
+  max-height: 200px; overflow-y: auto;
+}
+
+/* Micro Compact — gray */
+.micro-card {
+  width: 100%;
+  background: var(--c-micro-subtle);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--c-micro);
+}
+.micro-card summary { color: var(--c-micro); }
+
+/* Inbox — teal */
+.inbox-card {
+  background: linear-gradient(135deg, var(--c-inbox-subtle), var(--c-think-subtle));
+  border-left: 3px solid var(--c-inbox);
+}
+.inbox-card summary { color: var(--c-inbox); }
+
+/* Background notification — blue */
+.bg-card {
+  background: var(--surface-hover);
+  border-left: 3px solid var(--c-bg);
+}
+.bg-card summary { color: var(--c-bg); }
+
+/* Auto Compact — violet */
+.compact-card {
+  background: linear-gradient(135deg, var(--c-compact-subtle), rgba(124,58,237,0.02));
+  border-left: 3px solid var(--c-compact);
+}
+.compact-card summary { color: var(--c-compact); }
+.compact-badge {
+  margin-left: auto;
+  font-size: 10px; font-weight: 500;
+  letter-spacing: 0.04em;
+  padding: 2px 8px; border-radius: 10px;
+  color: var(--c-compact); background: var(--c-compact-subtle);
+}
+.compact-card.done .compact-badge {
+  color: var(--green); background: var(--green-subtle);
+}
+.compact-start-msg { color: var(--fg-muted); font-size: 12px; margin-bottom: 6px; }
+.compact-done-msg  { color: var(--green); font-size: 12px; margin-top: 8px; font-weight: 500; }
+.compact-label {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-top: 8px; margin-bottom: 2px;
+}
+.compact-thinking .compact-label { color: var(--c-compact); }
+.compact-summary .compact-label { color: var(--fg-secondary); }
+.compact-thinking-text {
+  color: var(--fg-muted); font-size: 12px; font-style: italic;
+  white-space: pre-wrap; word-break: break-word;
+}
+.compact-summary-text {
+  color: var(--fg-secondary); font-size: 13px;
+  background: var(--surface); border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm); padding: 10px 14px; margin-top: 4px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.compact-cursor {
+  display: inline-block; color: var(--c-compact);
+  animation: blink 0.8s step-end infinite;
+  font-weight: 100; font-size: 1.1em;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Todo Reminder — rose */
+.todo-reminder-block {
+  margin: 8px 0;
+  display: flex; align-items: flex-start; gap: 9px;
+  background: var(--c-todo-subtle);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--c-todo);
+  border-radius: var(--radius-md);
+  padding: 9px 14px;
+  font-size: 13px; color: var(--fg-secondary); line-height: 1.5;
+}
+.todo-icon-svg {
+  flex-shrink: 0; width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--c-todo);
+}
+.todo-sys-label {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--c-todo); margin-right: 6px;
+}
 
 /* ======================== Scrollbar ======================== */
 .chat-messages::-webkit-scrollbar { width: 5px; }
