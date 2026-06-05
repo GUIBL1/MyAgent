@@ -183,36 +183,33 @@ class MainLoop:
 
                 if isinstance(handler_output, str):
                     tool_result_content = handler_output
-                    sub_events: list[StreamEvent] = []
                 elif hasattr(handler_output, '__iter__'):
-                    # Generator handler（如 subagent）：收集子事件 + 最终 return 值
-                    sub_events = []
+                    # Generator handler：逐事件流式推送，首个 StreamEvent 触发 SUB_PANEL_ENTER
+                    sub_panel_opened = False
                     final_result = ""
                     try:
                         for item in handler_output:
                             if isinstance(item, StreamEvent):
-                                sub_events.append(item)
+                                if not sub_panel_opened:
+                                    yield StreamEvent(
+                                        type=EventType.SUB_PANEL_ENTER,
+                                        tool_id=block.id,
+                                        tool_name=block.name,
+                                    )
+                                    sub_panel_opened = True
+                                yield item
                             else:
                                 final_result = item
                         tool_result_content = str(final_result) if final_result else ""
                     except Exception as exc:
                         tool_result_content = f"Tool execution error: {exc}"
+                    if sub_panel_opened:
+                        yield StreamEvent(
+                            type=EventType.SUB_PANEL_EXIT,
+                            tool_id=block.id,
+                        )
                 else:
                     tool_result_content = str(handler_output)
-                    sub_events = []
-
-                # 转发子事件到前端子面板
-                if sub_events:
-                    yield StreamEvent(
-                        type=EventType.SUB_PANEL_ENTER,
-                        tool_id=block.id,
-                        tool_name=block.name,
-                    )
-                    yield from sub_events
-                    yield StreamEvent(
-                        type=EventType.SUB_PANEL_EXIT,
-                        tool_id=block.id,
-                    )
 
                 # 主 tool 结果
                 yield StreamEvent(

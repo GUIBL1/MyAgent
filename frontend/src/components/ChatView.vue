@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, nextTick, watch } from 'vue'
+import { computed, onMounted, ref, nextTick, watch } from 'vue'
 import { useChat } from '../composables/useChat'
 import { renderMarkdown } from '../utils/markdown'
 
@@ -13,10 +13,15 @@ const emit = defineEmits<{
   (e: 'toggle-right'): void
 }>()
 
-const { messages, isStreaming, wsStatus, hasSession, connect, send } = useChat()
+const { messages, isStreaming, wsStatus, hasSession, subPanelStack, connect, send } = useChat()
+const activeSubPanel = computed(() => {
+  const top = subPanelStack.value[subPanelStack.value.length - 1]
+  return top ? top.data : null
+})
 const input = ref('')
 const chatEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
+const recallBodyEl = ref<HTMLElement | null>(null)
 
 onMounted(() => connect())
 
@@ -32,6 +37,22 @@ function scrollToBottom() {
 }
 watch(() => messages.value.length, scrollToBottom)
 watch(() => messages.value[messages.value.length - 1]?.blocks, scrollToBottom, { deep: true })
+
+// 子面板自动滚到底部（仅当用户在底部时）
+let recallAutoScroll = true
+function onRecallScroll() {
+  if (!recallBodyEl.value) return
+  const { scrollTop, scrollHeight, clientHeight } = recallBodyEl.value
+  recallAutoScroll = scrollHeight - scrollTop - clientHeight < 60
+}
+watch(() => activeSubPanel.value, () => {
+  if (!recallAutoScroll) return
+  nextTick(() => {
+    if (recallBodyEl.value) {
+      recallBodyEl.value.scrollTop = recallBodyEl.value.scrollHeight
+    }
+  })
+}, { deep: true })
 
 // 用户手动上滚时暂停自动滚动
 function onScroll() {
@@ -66,6 +87,30 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault()
     handleSend()
   }
+}
+
+// ---- Recall sub-panel ----
+function openRecallDetail(block: any) {
+  recallAutoScroll = true
+  for (const msg of messages.value) {
+    for (const b of msg.blocks) {
+      if (b.type === 'recall_memory' && b.toolId === block.id) {
+        subPanelStack.value.push({ toolId: block.id, toolName: 'recall_memory', data: b as any })
+        nextTick(() => {
+          if (recallBodyEl.value) recallBodyEl.value.scrollTop = recallBodyEl.value.scrollHeight
+        })
+        return
+      }
+    }
+  }
+}
+
+function closeSubPanelTop() {
+  subPanelStack.value.pop()
+}
+
+function closeAllSubPanels() {
+  subPanelStack.value = []
 }
 
 // ---- 渲染 MD ----
@@ -149,7 +194,16 @@ function mdHtml(text: string): string {
                 <summary class="tool-header">
                   <span class="tool-dot"></span>
                   <code>{{ block.name }}</code>
-                  <span class="tool-meta" :class="block.status">{{ block.status === 'running' ? '执行中…' : '完成' }}</span>
+                  <span class="tool-summary-right">
+                    <span v-if="block.name === 'recall_memory'" class="detail-btn-inline" @click.prevent.stop="openRecallDetail(block)">
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                        <circle cx="5.5" cy="5.5" r="4"/><line x1="9" y1="9" x2="11" y2="11"/>
+                        <line x1="5.5" y1="3.5" x2="5.5" y2="7.5"/><line x1="3.5" y1="5.5" x2="7.5" y2="5.5"/>
+                      </svg>
+                      查看详情
+                    </span>
+                    <span class="tool-meta" :class="block.status">{{ block.status === 'running' ? '执行中…' : '完成' }}</span>
+                  </span>
                 </summary>
                 <div class="tool-body">
                   <div class="tool-input"><pre>{{ JSON.stringify(block.input, null, 2) }}</pre></div>
@@ -241,6 +295,152 @@ function mdHtml(text: string): string {
             v-if="isStreaming && mi === messages.length - 1 && msg.role === 'assistant'"
             class="cursor"
           >|</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════ Recall Memory 子面板 Overlay ═══════════ -->
+    <div v-if="subPanelStack.length > 0" class="recall-overlay" @click.self="closeAllSubPanels">
+      <div v-if="activeSubPanel" class="recall-panel">
+        <div class="recall-panel-header">
+          <button class="recall-back-btn" @click="closeSubPanelTop">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="7.5,2 3.5,6 7.5,10"/>
+            </svg>
+            返回对话
+          </button>
+          <div class="recall-sub-title">Memory Recall<span v-if="activeSubPanel.synth.query"> · {{ activeSubPanel.synth.query }}</span></div>
+        </div>
+        <div ref="recallBodyEl" class="recall-panel-body" @scroll="onRecallScroll">
+
+          <!-- ── Stage 1: Expand ── -->
+          <div class="recall-stage recall-stage-expand" :class="activeSubPanel.expand.status">
+            <details :open="activeSubPanel.expand.status !== 'pending'">
+              <summary>
+                <span class="recall-stage-dot"></span>
+                STAGE 1 · Query Expansion
+                <span class="recall-stage-badge">{{ activeSubPanel.expand.status === 'running' ? '执行中' : activeSubPanel.expand.status === 'done' ? '完成' : '等待中' }}</span>
+              </summary>
+              <div class="recall-stage-body">
+                <div v-if="activeSubPanel.expand.status !== 'pending'" class="recall-explain">将原始查询发给 LLM，生成 3–10 条不同角度表述的变体查询，覆盖同义词改写、抽象泛化、关键词组合等方向，提高召回覆盖度。</div>
+                <div v-if="activeSubPanel.expand.thinking" class="recall-think-block">
+                  <details :open="activeSubPanel.active && activeSubPanel.expand.status === 'running' && !activeSubPanel.expand.text"><summary>EXPANSION THINKING</summary>
+                    <div class="recall-think-content">{{ activeSubPanel.expand.thinking }}</div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.expand.text" class="recall-text-block">
+                  <details :open="activeSubPanel.active && activeSubPanel.expand.status === 'running' && !!activeSubPanel.expand.text"><summary>EXPANSION OUTPUT</summary>
+                    <div class="recall-text-content">{{ activeSubPanel.expand.text }}</div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.expand.variants.length" class="recall-variant-list">
+                  <div class="recall-variant-label">生成变体查询（含原始查询共 {{ activeSubPanel.expand.count }} 条）：</div>
+                  <div v-for="(v, vi) in activeSubPanel.expand.variants" :key="vi" class="recall-variant-item">
+                    <span class="recall-variant-idx">{{ vi + 1 }}</span><span>{{ v }}<span v-if="vi === 0" class="recall-variant-original">原始</span></span>
+                  </div>
+                </div>
+                <span v-if="activeSubPanel.expand.status === 'running'" class="recall-blink">|</span>
+              </div>
+            </details>
+          </div>
+
+          <!-- ── Stage 2: Retrieve ── -->
+          <div class="recall-stage recall-stage-retrieve" :class="activeSubPanel.retrieve.status">
+            <details :open="activeSubPanel.retrieve.status !== 'pending'">
+              <summary>
+                <span class="recall-stage-dot"></span>
+                STAGE 2 · Multi-Query Retrieval
+                <span class="recall-stage-badge">{{ activeSubPanel.retrieve.status === 'running' ? '执行中' : activeSubPanel.retrieve.status === 'done' ? '完成' : '等待中' }}</span>
+              </summary>
+              <div class="recall-stage-body">
+                <div v-if="activeSubPanel.retrieve.status !== 'pending'" class="recall-explain">将每条变体查询转为向量，分别检索 Chroma 向量数据库，去重合并候选记忆。</div>
+                <div v-for="(qr, qri) in activeSubPanel.retrieve.queries" :key="qri" class="recall-query-card">
+                  <details :open="qr.active">
+                    <summary class="recall-qr-header">查询 <code>{{ qr.query }}</code><span class="recall-qr-hits">{{ qr.error ? '失败' : qr.active ? '查询中…' : qr.hit_count + ' 条命中' }}</span></summary>
+                    <div v-if="qr.error" class="recall-qr-error">{{ qr.error }}</div>
+                    <div v-for="(hit, hi) in qr.hits" :key="hi" class="recall-qr-item">
+                      <div class="recall-qr-id">{{ hit.id }}<span v-if="hit.duplicate" class="recall-dup-tag">重复</span></div>
+                      <div class="recall-qr-dist">distance: {{ hit.distance }} · access: {{ hit.access_count }}</div>
+                      <div class="recall-qr-doc">{{ hit.doc }}</div>
+                    </div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.retrieve.status === 'done'" class="recall-retrieve-summary">去重后共 <strong>{{ activeSubPanel.retrieve.total_candidates }}</strong> 条候选记忆</div>
+              </div>
+            </details>
+          </div>
+
+          <!-- ── Stage 3: Rerank ── -->
+          <div class="recall-stage recall-stage-rerank" :class="activeSubPanel.rerank.status">
+            <details :open="activeSubPanel.rerank.status !== 'pending'">
+              <summary>
+                <span class="recall-stage-dot"></span>
+                STAGE 3 · LLM Reranking
+                <span class="recall-stage-badge">{{ activeSubPanel.rerank.status === 'running' ? '执行中' : activeSubPanel.rerank.status === 'done' ? '完成' : '等待中' }}</span>
+              </summary>
+              <div class="recall-stage-body">
+                <div v-if="activeSubPanel.rerank.status !== 'pending'" class="recall-explain">将去重后的候选记忆送给重排序 LLM，按语义匹配度、向量距离、历史访问频率综合打分，输出降序排列。</div>
+                <div v-if="activeSubPanel.rerank.thinking" class="recall-think-block">
+                  <details :open="activeSubPanel.active && activeSubPanel.rerank.status === 'running' && !activeSubPanel.rerank.text"><summary>RERANK THINKING</summary>
+                    <div class="recall-think-content">{{ activeSubPanel.rerank.thinking }}</div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.rerank.text" class="recall-text-block">
+                  <details :open="activeSubPanel.active && activeSubPanel.rerank.status === 'running' && !!activeSubPanel.rerank.text"><summary>RERANK OUTPUT</summary>
+                    <div class="recall-text-content">{{ activeSubPanel.rerank.text }}</div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.rerank.ranked_ids.length" class="recall-ranked-list">
+                  <div class="recall-ranked-label">排序结果（top {{ activeSubPanel.rerank.top_k }} 送入合成）：</div>
+                  <div v-for="(rid, ri) in activeSubPanel.rerank.ranked_ids" :key="ri" class="recall-ranked-item" :class="{ 'recall-ranked-top': ri < activeSubPanel.rerank.top_k }">
+                    <span class="recall-rank-num">{{ ri + 1 }}</span>
+                    <span class="recall-rank-id">{{ rid }}</span>
+                    <span v-if="ri >= activeSubPanel.rerank.top_k" class="recall-rank-skip">舍弃</span>
+                  </div>
+                </div>
+                <span v-if="activeSubPanel.rerank.status === 'running'" class="recall-blink">|</span>
+              </div>
+            </details>
+          </div>
+
+          <!-- ── Stage 4: Synthesize ── -->
+          <div class="recall-stage recall-stage-synth" :class="activeSubPanel.synth.status">
+            <details :open="activeSubPanel.synth.status !== 'pending'">
+              <summary>
+                <span class="recall-stage-dot"></span>
+                STAGE 4 · LLM Synthesis
+                <span class="recall-stage-badge">{{ activeSubPanel.synth.status === 'running' ? '执行中' : activeSubPanel.synth.status === 'done' ? '完成' : '等待中' }}</span>
+              </summary>
+              <div class="recall-stage-body">
+                <div v-if="activeSubPanel.synth.status !== 'pending'" class="recall-explain">将重排结果组装为记忆片段列表，送合成 LLM 生成面向原始查询的最终回答。如有矛盾以索引小的片段为准。</div>
+                <div v-if="activeSubPanel.synth.fragments.length" class="recall-synth-input">
+                  <details :open="activeSubPanel.active && activeSubPanel.synth.status === 'running' && !activeSubPanel.synth.thinking && !activeSubPanel.synth.text"><summary class="recall-si-header">合成输入 · {{ activeSubPanel.synth.fragments.length }} 条记忆片段</summary>
+                    <div class="recall-si-body">
+                      <div v-for="(f, fi) in activeSubPanel.synth.fragments" :key="fi">
+                        <span class="recall-frag-tag">[{{ f.index }}]</span> {{ f.content }}
+                      </div>
+                    </div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.synth.thinking" class="recall-think-block">
+                  <details :open="activeSubPanel.active && activeSubPanel.synth.status === 'running' && !activeSubPanel.synth.text"><summary>SYNTHESIS THINKING</summary>
+                    <div class="recall-think-content">{{ activeSubPanel.synth.thinking }}</div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.synth.text" class="recall-text-block">
+                  <details :open="activeSubPanel.active && activeSubPanel.synth.status === 'running' && !!activeSubPanel.synth.text"><summary>SYNTHESIS OUTPUT</summary>
+                    <div class="recall-text-content">{{ activeSubPanel.synth.text }}</div>
+                  </details>
+                </div>
+                <div v-if="activeSubPanel.synth.result" class="recall-final-result">
+                  <div class="recall-fr-label">合成结果</div>
+                  <div class="md-body" v-html="mdHtml(activeSubPanel.synth.result)"></div>
+                </div>
+                <span v-if="activeSubPanel.synth.status === 'running'" class="recall-blink">|</span>
+              </div>
+            </details>
+          </div>
+
         </div>
       </div>
     </div>
@@ -456,13 +656,13 @@ function mdHtml(text: string): string {
   content: '';
   display: inline-block; flex-shrink: 0;
   width: 0; height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--c-think);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--c-think);
   transition: transform 0.15s ease;
 }
 .thinking details[open] > summary::before {
-  transform: rotate(180deg);
+  transform: rotate(90deg);
 }
 .thinking-content {
   padding: 8px 14px 14px;
@@ -507,13 +707,13 @@ function mdHtml(text: string): string {
   content: '';
   display: inline-block; flex-shrink: 0;
   width: 0; height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--c-tool);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--c-tool);
   transition: transform 0.15s ease;
 }
 .tool-call details[open] > .tool-header::before {
-  transform: rotate(180deg);
+  transform: rotate(90deg);
 }
 .tool-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
@@ -630,9 +830,9 @@ textarea::placeholder { color: var(--fg-muted); }
   content: '';
   display: inline-block; flex-shrink: 0;
   width: 0; height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
   transition: transform 0.15s ease;
 }
 .status-card details[open] > summary::before { transform: rotate(180deg); }
@@ -755,4 +955,309 @@ textarea::placeholder { color: var(--fg-muted); }
   background: var(--border); border-radius: 10px;
 }
 .chat-messages::-webkit-scrollbar-thumb:hover { background: #D4C4AD; }
+
+/* ======================== Detail Button (in tool card) ======================== */
+.tool-summary-right {
+  margin-left: auto; display: flex; align-items: center; gap: 6px;
+}
+.detail-btn-inline {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px;
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--c-tool); background: var(--c-tool-subtle);
+  border: 1px solid rgba(6,182,212,0.2); border-radius: var(--radius-sm);
+  cursor: pointer; transition: 0.15s ease;
+  white-space: nowrap;
+}
+.detail-btn-inline:hover { background: rgba(6,182,212,0.15); }
+
+/* ======================== Recall Sub-Panel Overlay ======================== */
+.recall-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(26,26,26,0.08); backdrop-filter: blur(2px);
+  display: flex; justify-content: center; align-items: flex-start;
+  padding-top: 48px;
+}
+.recall-panel {
+  width: 700px; max-width: 96vw; max-height: 82vh;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+}
+.recall-panel-header {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  padding: 12px 18px; border-bottom: 1px solid var(--border-light); background: var(--surface-hover);
+}
+.recall-back-btn {
+  display: flex; align-items: center; gap: 4px;
+  font-family: 'Space Grotesk', sans-serif; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--fg-muted); cursor: pointer; background: none; border: none;
+  padding: 4px 8px; border-radius: var(--radius-sm); transition: 0.15s ease;
+}
+.recall-back-btn:hover { color: var(--amber); background: var(--amber-subtle); }
+.recall-sub-title {
+  font-family: 'Space Grotesk', sans-serif; font-size: 12px; font-weight: 600;
+  color: var(--fg-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.recall-sub-title span { color: var(--fg-muted); font-weight: 400; }
+
+.recall-panel-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+.recall-panel-body::-webkit-scrollbar { width: 5px; }
+.recall-panel-body::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 8px 0;
+}
+.recall-panel-body::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 10px;
+}
+.recall-panel-body::-webkit-scrollbar-thumb:hover { background: #D4C4AD; }
+
+/* ── Stage Card ── */
+.recall-stage {
+  margin-bottom: 14px; border-radius: var(--radius-md); border: 1px solid var(--border); overflow: hidden;
+  transition: opacity 0.3s ease, border-color 0.3s ease;
+}
+.recall-stage.pending { opacity: 0.55; }
+.recall-stage details > summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px; cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  user-select: none; list-style: none;
+}
+.recall-stage details > summary::-webkit-details-marker { display: none; }
+.recall-stage details > summary::before {
+  content: ''; display: inline-block; flex-shrink: 0;
+  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid currentColor; transition: transform 0.15s ease;
+}
+.recall-stage details[open] > summary::before { transform: rotate(180deg); }
+.recall-stage-body {
+  padding: 0 14px 12px; font-size: 13px; line-height: 1.6;
+  color: var(--fg-secondary); border-top: 1px solid var(--border-light);
+  display: none;
+}
+.recall-stage details[open] > .recall-stage-body { display: block; }
+
+.recall-stage-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--fg-muted);
+}
+.recall-stage.pending .recall-stage-dot { background: var(--fg-muted); }
+.recall-stage.running .recall-stage-dot { animation: recall-pulse 1.2s ease-in-out infinite; }
+
+@keyframes recall-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.recall-stage-badge {
+  margin-left: auto; font-size: 10px; font-weight: 500;
+  letter-spacing: 0.04em; padding: 2px 8px; border-radius: 10px;
+  color: var(--fg-muted);
+}
+.recall-stage.running .recall-stage-badge { color: var(--amber); background: var(--amber-subtle); }
+.recall-stage.done .recall-stage-badge { color: var(--green); background: var(--green-subtle); }
+
+/* Stage color variants */
+.recall-stage-expand   { border-left: 3px solid var(--c-think); background: var(--c-think-subtle); }
+.recall-stage-expand   details > summary { color: var(--c-think); }
+.recall-stage-expand   .recall-stage-dot { background: var(--c-think); }
+.recall-stage-retrieve { border-left: 3px solid var(--c-bg); background: var(--c-bg-subtle); }
+.recall-stage-retrieve details > summary { color: var(--c-bg); }
+.recall-stage-retrieve .recall-stage-dot { background: var(--c-bg); }
+.recall-stage-rerank   { border-left: 3px solid var(--c-compact); background: var(--c-compact-subtle); }
+.recall-stage-rerank   details > summary { color: var(--c-compact); }
+.recall-stage-rerank   .recall-stage-dot { background: var(--c-compact); }
+.recall-stage-synth    { border-left: 3px solid var(--c-inbox); background: var(--c-inbox-subtle); }
+.recall-stage-synth    details > summary { color: var(--c-inbox); }
+.recall-stage-synth    .recall-stage-dot { background: var(--c-inbox); }
+
+/* ── Explanation ── */
+.recall-explain {
+  margin: 8px 0; padding: 8px 14px; font-size: 13px;
+  background: var(--surface); border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm); color: var(--fg-secondary); line-height: 1.65;
+}
+
+/* ── Think block (in stage body) ── */
+.recall-think-block {
+  margin: 8px 0; background: var(--amber-ghost); border: 1px solid var(--border);
+  border-left: 3px solid var(--amber); border-radius: var(--radius-md); overflow: hidden;
+}
+.recall-think-block summary {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--amber);
+  user-select: none; list-style: none;
+}
+.recall-think-block summary::-webkit-details-marker { display: none; }
+.recall-think-block summary::before {
+  content: ''; display: inline-block; flex-shrink: 0;
+  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid var(--amber); transition: transform 0.15s ease;
+}
+.recall-think-block details[open] > summary::before { transform: rotate(180deg); }
+.recall-think-content {
+  padding: 4px 12px 10px; font-size: 12px; color: var(--fg-muted);
+  font-style: italic; white-space: pre-wrap; border-top: 1px solid var(--border-light);
+}
+
+/* ── Text block (LLM output in stage body) ── */
+.recall-text-block {
+  margin: 8px 0; background: var(--surface); border: 1px solid var(--border-light);
+  border-left: 3px solid var(--c-think); border-radius: var(--radius-md); overflow: hidden;
+}
+.recall-stage-rerank .recall-text-block { border-left-color: var(--c-compact); }
+.recall-stage-synth  .recall-text-block { border-left-color: var(--c-inbox); }
+.recall-text-block summary {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-think);
+  user-select: none; list-style: none;
+}
+.recall-stage-rerank .recall-text-block summary { color: var(--c-compact); }
+.recall-stage-synth  .recall-text-block summary { color: var(--c-inbox); }
+.recall-text-block summary::-webkit-details-marker { display: none; }
+.recall-text-block summary::before {
+  content: ''; display: inline-block; flex-shrink: 0;
+  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid currentColor; transition: transform 0.15s ease;
+}
+.recall-text-block details[open] > summary::before { transform: rotate(180deg); }
+.recall-text-content {
+  padding: 4px 12px 10px; font-size: 12px; color: var(--fg-secondary);
+  white-space: pre-wrap; font-family: 'JetBrains Mono', monospace;
+  border-top: 1px solid var(--border-light);
+}
+
+/* ── Variant list ── */
+.recall-variant-list { margin: 8px 0; }
+.recall-variant-label { font-size: 11px; color: var(--fg-muted); margin-bottom: 4px; }
+.recall-variant-item {
+  display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; font-size: 13px;
+}
+.recall-variant-idx {
+  flex-shrink: 0; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  color: var(--c-think); background: var(--c-think-subtle); border-radius: 50%;
+}
+.recall-variant-original {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 1px 5px;
+  background: var(--c-think-subtle); color: var(--c-think); border-radius: 3px; margin-left: 2px;
+}
+
+/* ── Query result card ── */
+.recall-query-card {
+  margin: 8px 0; background: var(--surface); border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm); overflow: hidden;
+}
+.recall-query-card details > summary::-webkit-details-marker { display: none; }
+.recall-query-card details > summary::before {
+  content: ''; display: inline-block; flex-shrink: 0;
+  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid var(--c-bg); transition: transform 0.15s ease;
+  margin-right: 2px;
+}
+.recall-query-card details[open] > summary::before { transform: rotate(180deg); }
+.recall-qr-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px; font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted);
+  background: var(--surface-hover); cursor: pointer; user-select: none; list-style: none;
+}
+.recall-query-card details[open] > .recall-qr-header {
+  border-bottom: 1px solid var(--border-light);
+}
+.recall-qr-header code {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--fg-secondary);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.recall-qr-hits { margin-left: auto; font-size: 10px; font-weight: 500; color: var(--c-bg); }
+.recall-qr-error { padding: 7px 12px; font-size: 12px; color: var(--red); }
+.recall-qr-item {
+  padding: 7px 12px; border-bottom: 1px solid var(--border-light);
+  font-size: 12px; color: var(--fg-secondary);
+}
+.recall-qr-item:last-child { border-bottom: none; }
+.recall-qr-id { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--fg-muted); margin-bottom: 2px; }
+.recall-qr-dist { font-size: 10px; color: var(--fg-muted); }
+.recall-qr-doc { margin-top: 3px; font-size: 12px; line-height: 1.5; max-height: 80px; overflow-y: auto; }
+.recall-dup-tag {
+  font-family: 'Space Grotesk', sans-serif; font-size: 8px; font-weight: 600;
+  text-transform: uppercase; padding: 1px 5px; border-radius: 8px;
+  color: var(--fg-muted); background: var(--border-light); margin-left: 6px;
+}
+.recall-retrieve-summary {
+  text-align: center; padding: 4px 0 0; font-size: 11px; color: var(--fg-muted);
+}
+
+/* ── Ranked list ── */
+.recall-ranked-list { margin: 8px 0; }
+.recall-ranked-label { font-size: 11px; color: var(--fg-muted); margin-bottom: 4px; }
+.recall-ranked-item {
+  display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--border-light); font-size: 12px; color: var(--fg-secondary);
+}
+.recall-ranked-item:last-child { border-bottom: none; }
+.recall-rank-num {
+  flex-shrink: 0; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  color: var(--c-compact); background: var(--c-compact-subtle); border-radius: 50%;
+}
+.recall-ranked-top .recall-rank-num { color: var(--c-compact); background: var(--c-compact-subtle); }
+.recall-ranked-item:not(.recall-ranked-top) .recall-rank-num { color: var(--fg-muted); background: var(--border-light); }
+.recall-rank-id { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--fg-muted); }
+.recall-rank-skip {
+  margin-left: auto; font-size: 9px; font-weight: 500; color: var(--fg-muted);
+  font-family: 'Space Grotesk', sans-serif; text-transform: uppercase;
+}
+
+/* ── Synthesis input ── */
+.recall-synth-input {
+  margin: 8px 0; background: var(--surface); border: 1px solid var(--border-light);
+  border-left: 3px solid var(--c-inbox);
+  border-radius: var(--radius-sm); overflow: hidden;
+}
+.recall-si-header {
+  padding: 6px 12px; font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; color: var(--fg-muted); background: var(--surface-hover);
+  border-bottom: 1px solid var(--border-light); cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: 6px;
+}
+.recall-si-header::-webkit-details-marker { display: none; }
+.recall-si-header::before {
+  content: ''; display: inline-block; flex-shrink: 0;
+  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid var(--fg-muted); transition: transform 0.15s ease;
+}
+.recall-synth-input details[open] > .recall-si-header::before { transform: rotate(180deg); }
+.recall-synth-input details[open] > .recall-si-header {
+  border-bottom: 1px solid var(--border-light);
+}
+.recall-si-body {
+  padding: 8px 12px; font-size: 12px; color: var(--fg-secondary);
+}
+.recall-frag-tag {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--c-think);
+  font-weight: 500;
+}
+
+/* ── Final result ── */
+.recall-final-result {
+  margin: 8px 0; padding: 10px 14px;
+  background: var(--green-subtle); border: 1px solid var(--border);
+  border-left: 3px solid var(--green); border-radius: var(--radius-md);
+  font-size: 13px; line-height: 1.65; color: var(--fg);
+}
+.recall-fr-label {
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--green); margin-bottom: 4px;
+}
+
+/* ── Blinking cursor ── */
+.recall-blink {
+  display: inline-block; color: var(--amber);
+  animation: blink 0.8s step-end infinite; font-weight: 100; font-size: 1.1em;
+}
 </style>

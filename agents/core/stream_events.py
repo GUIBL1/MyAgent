@@ -44,6 +44,24 @@ class EventType(Enum):
     TODO_REMINDER = "todo_reminder"
     TOKEN_USAGE = "token_usage"
 
+    # === Memory Recall 管道事件 ===
+    RECALL_EXPAND_START = "recall_expand_start"
+    RECALL_EXPAND_THINKING = "recall_expand_thinking"
+    RECALL_EXPAND_TEXT = "recall_expand_text"
+    RECALL_EXPAND_DONE = "recall_expand_done"
+    RECALL_QUERY_START = "recall_query_start"
+    RECALL_QUERY_RESULT = "recall_query_result"
+    RECALL_RETRIEVE_DONE = "recall_retrieve_done"
+    RECALL_RERANK_START = "recall_rerank_start"
+    RECALL_RERANK_THINKING = "recall_rerank_thinking"
+    RECALL_RERANK_TEXT = "recall_rerank_text"
+    RECALL_RERANK_DONE = "recall_rerank_done"
+    RECALL_SYNTH_START = "recall_synth_start"
+    RECALL_SYNTH_INPUT = "recall_synth_input"
+    RECALL_SYNTH_THINKING = "recall_synth_thinking"
+    RECALL_SYNTH_TEXT = "recall_synth_text"
+    RECALL_SYNTH_DONE = "recall_synth_done"
+
     # === 非渲染事件 ===
     CONTEXT_ENTRY = "context_entry"
     CONTEXT_PATCH = "context_patch"
@@ -74,6 +92,22 @@ class StreamEvent:
     │ INBOX_MESSAGE        │ content                              │
     │ TODO_REMINDER        │ content                              │
     │ TOKEN_USAGE          │ content                              │
+    │ RECALL_EXPAND_START  │ content                              │
+    │ RECALL_EXPAND_THINKING│ delta                                │
+    │ RECALL_EXPAND_TEXT   │ delta                                │
+    │ RECALL_EXPAND_DONE   │ content (JSON: variants + original)   │
+    │ RECALL_QUERY_START   │ content (JSON: query + index)         │
+    │ RECALL_QUERY_RESULT  │ content (JSON: query + hits)          │
+    │ RECALL_RETRIEVE_DONE │ content (去重汇总)                    │
+    │ RECALL_RERANK_START  │ content                              │
+    │ RECALL_RERANK_THINKING│ delta                                │
+    │ RECALL_RERANK_TEXT   │ delta                                │
+    │ RECALL_RERANK_DONE   │ content (JSON: top_k + total)         │
+    │ RECALL_SYNTH_START   │ content                              │
+    │ RECALL_SYNTH_INPUT   │ content (JSON: fragments)             │
+    │ RECALL_SYNTH_THINKING│ delta                                │
+    │ RECALL_SYNTH_TEXT    │ delta                                │
+    │ RECALL_SYNTH_DONE    │ content (最终合成回答)                 │
     │ CONTEXT_ENTRY        │ content (序列化的 Anthropic API msg)  │
     │ CONTEXT_PATCH        │ content (序列化的 patch list)         │
     └──────────────────────┴──────────────────────────────────────┘

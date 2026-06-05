@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import atexit
 import json
+from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import re
+
+from agents.core.stream_events import EventType, StreamEvent
 
 class MemoryManager:
     """记忆管理器 — agent 写/查记忆的唯一入口。"""
@@ -203,52 +206,137 @@ class MemoryManager:
         except OSError as exc:
             return f"Memory write failed: {exc}"
 
-    def recall_memory(self, query: str) -> str:
-        """RAG 检索长期记忆：query 扩展 → 向量检索 → 重排序 → 合成 LLM。"""
+    def recall_memory(self, query: str) -> Generator[StreamEvent | str, None, None]:
+        """RAG 检索长期记忆（流式）：query 扩展 → 向量检索 → 重排序 → 合成 LLM。
+
+        作为 generator 型 tool handler，yield StreamEvent 推送子面板实时进度，
+        最终 yield 一个纯字符串作为 tool_result 返回给 LLM。
+        """
         if not self._collection:
-            return "No relevant memory."
+            yield "No relevant memory."
+            return
 
         try:
-            # Step 1: query 扩展 — 让 LLM 生成多条变体查询
-            expanded = self._expand_query(query)
+            # ═══════════ Stage 1: Query Expansion ═══════════
+            yield StreamEvent(
+                type=EventType.RECALL_EXPAND_START,
+                content="将原始查询发给 LLM，生成 3–10 条不同角度表述的变体查询，覆盖同义词改写、抽象泛化、关键词组合等方向，提高召回覆盖度。",
+            )
+            expanded = yield from self._expand_query_streaming(query)
+            yield StreamEvent(
+                type=EventType.RECALL_EXPAND_DONE,
+                content=json.dumps({"variants": expanded, "count": len(expanded)}, ensure_ascii=False),
+            )
 
-            # Step 2: 多路检索 — 每条变体独立检索
+            # ═══════════ Stage 2: Multi-Query Retrieval ═══════════
             all_candidates: dict[str, tuple[str, dict, float]] = {}  # id → (doc, meta, distance)
-            for q in expanded:
+            for i, q in enumerate(expanded):
+                yield StreamEvent(
+                    type=EventType.RECALL_QUERY_START,
+                    content=json.dumps({"query": q, "index": i, "total": len(expanded)}, ensure_ascii=False),
+                )
                 embedding = self._embed(q)
                 if not embedding:
+                    yield StreamEvent(
+                        type=EventType.RECALL_QUERY_RESULT,
+                        content=json.dumps({"query": q, "hit_count": 0, "hits": [], "error": "embedding failed"}, ensure_ascii=False),
+                    )
                     continue
-                result = self._collection.query(
-                    query_embeddings=[embedding],
-                    n_results=self._max_rag_candidates,
-                )
+                try:
+                    result = self._collection.query(
+                        query_embeddings=[embedding],
+                        n_results=self._max_rag_candidates,
+                    )
+                except Exception as exc:
+                    yield StreamEvent(
+                        type=EventType.RECALL_QUERY_RESULT,
+                        content=json.dumps({"query": q, "hit_count": 0, "hits": [], "error": f"query failed: {exc}"}, ensure_ascii=False),
+                    )
+                    continue
+                hits: list[dict[str, Any]] = []
                 if result and result.get("ids"):
-                    for i, id in enumerate(result["ids"][0]):
-                        if id not in all_candidates:
-                            doc = result["documents"][0][i] if result.get("documents") else ""
-                            meta = result["metadatas"][0][i] if result.get("metadatas") else {}
-                            dist = result["distances"][0][i] if result.get("distances") else 0.0
-                            all_candidates[id] = (doc, meta, dist)
+                    for j, mem_id in enumerate(result["ids"][0]):
+                        if mem_id not in all_candidates:
+                            doc = result["documents"][0][j] if result.get("documents") else ""
+                            meta = result["metadatas"][0][j] if result.get("metadatas") else {}
+                            dist = result["distances"][0][j] if result.get("distances") else 0.0
+                            all_candidates[mem_id] = (doc, meta, dist)
+                            hits.append({
+                                "id": mem_id,
+                                "doc": doc,
+                                "distance": round(dist, 4),
+                                "access_count": meta.get("access_count", 0) if meta else 0,
+                            })
+                        else:
+                            # 重复记忆：已在之前某条变体查询中命中过，仍输出完整信息供前端展示
+                            _, cached_meta, cached_dist = all_candidates[mem_id]
+                            hits.append({
+                                "id": mem_id,
+                                "doc": all_candidates[mem_id][0],
+                                "distance": round(cached_dist, 4),
+                                "access_count": cached_meta.get("access_count", 0) if cached_meta else 0,
+                                "duplicate": True,
+                            })
+                yield StreamEvent(
+                    type=EventType.RECALL_QUERY_RESULT,
+                    content=json.dumps({"query": q, "hit_count": len(hits), "hits": hits}, ensure_ascii=False),
+                )
 
             if not all_candidates:
-                return "No relevant memory."
+                yield "No relevant memory."
+                return
 
-            # Step 3: 重排序 — LLM 对候选逐条打分
-            ranked = self._rerank(query, all_candidates)
+            total_candidates = len(all_candidates)
+            yield StreamEvent(
+                type=EventType.RECALL_RETRIEVE_DONE,
+                content=json.dumps({"total_candidates": total_candidates}, ensure_ascii=False),
+            )
 
-            # Step 4: 合成 — top-K 送合成 LLM
-            top = ranked[: self._max_rag_candidates]
-            result = self._synthesize(query, top)
+            # ═══════════ Stage 3: Reranking ═══════════
+            yield StreamEvent(
+                type=EventType.RECALL_RERANK_START,
+                content=f"将去重后的 {total_candidates} 条候选记忆送给重排序 LLM，按语义匹配度、向量距离、历史访问频率综合打分，输出降序排列。",
+            )
+            ranked = yield from self._rerank_streaming(query, all_candidates)
+            top = ranked[:self._max_rag_candidates]
+            yield StreamEvent(
+                type=EventType.RECALL_RERANK_DONE,
+                content=json.dumps({
+                    "top_k": len(top),
+                    "total": len(ranked),
+                    "ranked_ids": [mem_id for mem_id, _ in ranked],
+                }, ensure_ascii=False),
+            )
+
+            # ═══════════ Stage 4: Synthesis ═══════════
+            yield StreamEvent(
+                type=EventType.RECALL_SYNTH_START,
+                content=f"将 Top-{len(top)} 重排结果组装为记忆片段列表，送合成 LLM 生成面向原始查询的最终回答。如有矛盾以索引小的片段为准。",
+            )
+            # 推送合成输入
+            fragments_for_display = []
+            for fi, (mem_id, doc) in enumerate(top):
+                fragments_for_display.append({"index": fi, "id": mem_id, "content": doc})
+            yield StreamEvent(
+                type=EventType.RECALL_SYNTH_INPUT,
+                content=json.dumps({"query": query, "fragments": fragments_for_display}, ensure_ascii=False),
+            )
+
+            result = yield from self._synthesize_streaming(query, top)
+            yield StreamEvent(
+                type=EventType.RECALL_SYNTH_DONE,
+                content=result,
+            )
 
             # 更新命中记忆的访问元数据
-            hit_ids = [id for id, _ in top]
+            hit_ids = [mem_id for mem_id, _ in top]
             if hit_ids:
                 self._update_access_metadata(hit_ids)
 
-            return result
+            yield result
 
         except Exception as exc:
-            return f"[Memory] recall failed: {exc}"
+            yield f"[Memory] recall failed: {exc}"
 
     # ======================== private: memory recall tools ========================
     def _update_access_metadata(self, hit_ids: list[str]) -> None:
@@ -297,23 +385,29 @@ class MemoryManager:
         print(f"[Memory] embedding failed after {max_retries} retries.")
         return None
 
-    def _expand_query(self, query: str) -> list[str]:
-        """LLM 生成多条变体查询，覆盖不同表述角度。"""
+    def _expand_query_streaming(self, query: str) -> Generator[StreamEvent, None, list[str]]:
+        """流式 LLM 生成多条变体查询，yield thinking/text delta，return 变体列表。"""
+        expanded_system_prompt = (
+            "You are a retrieval query expander. "
+            "Task: Generate 3-10 differently phrased search queries based on the user's query."
+            "Requirements: One per line; no numbering, no quotes, no explanations; output queries only."
+            "Coverage: synonym rewrite, abstraction/generalization, keyword combination."
+            "Preserve core entities/time/place/product names/code snippets; do not fabricate new facts."
+            "Match the output language to the original query."
+        )
         try:
-            expanded_system_prompt = (
-                "You are a retrieval query expander. "
-                "Task: Generate 3-10 differently phrased search queries based on the user's query."
-                "Requirements: One per line; no numbering, no quotes, no explanations; output queries only."
-                "Coverage: synonym rewrite, abstraction/generalization, keyword combination."
-                "Preserve core entities/time/place/product names/code snippets; do not fabricate new facts."
-                "Match the output language to the original query."
-            )
             with self._expand_client.messages.stream(
                 model=self._expand_model,
                 system=expanded_system_prompt,
                 messages=[{"role": "user", "content": query}],
                 max_tokens=self._expand_max_output_tokens,
             ) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta":
+                        if event.delta.type == "thinking_delta":
+                            yield StreamEvent(type=EventType.RECALL_EXPAND_THINKING, delta=event.delta.thinking)
+                        elif event.delta.type == "text_delta":
+                            yield StreamEvent(type=EventType.RECALL_EXPAND_TEXT, delta=event.delta.text)
                 response = stream.get_final_message()
             text = "".join(
                 getattr(block, "text", "")
@@ -328,13 +422,13 @@ class MemoryManager:
         except Exception:
             return [query]
 
-    def _rerank(self, query: str, candidates: dict[str, tuple[str, dict, float]]) -> list[tuple[str, str]]:
-        """LLM 对候选记忆逐条打分排序。"""
+    def _rerank_streaming(self, query: str, candidates: dict[str, tuple[str, dict, float]]) -> Generator[StreamEvent, None, list[tuple[str, str]]]:
+        """流式 LLM 对候选记忆逐条打分排序，yield thinking/text delta，return 排序列表。"""
         lines = []
-        for (id, (doc, meta, dist)) in candidates.items():
+        for (mem_id, (doc, meta, dist)) in candidates.items():
             access_count = meta.get("access_count", 0) if meta else 0
             lines.append(
-                f"memory id:{id}.\n"
+                f"memory id:{mem_id}.\n"
                 f"access count:{access_count}. distance: {dist:.4f}.\n"
                 f"content: {doc}"
             )
@@ -357,14 +451,20 @@ class MemoryManager:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=self._rerank_max_output_tokens,
             ) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta":
+                        if event.delta.type == "thinking_delta":
+                            yield StreamEvent(type=EventType.RECALL_RERANK_THINKING, delta=event.delta.thinking)
+                        elif event.delta.type == "text_delta":
+                            yield StreamEvent(type=EventType.RECALL_RERANK_TEXT, delta=event.delta.text)
                 response = stream.get_final_message()
             text = "".join(
                 getattr(block, "text", "")
                 for block in response.content if hasattr(block, "text")
             )
             order: list[tuple[str, str]] = []
-            for line in text.strip().splitlines():
-                memory_id = line.strip()
+            for line_text in text.strip().splitlines():
+                memory_id = line_text.strip()
                 if memory_id in candidates:
                     order.append((memory_id, candidates[memory_id][0]))
             if order:
@@ -372,10 +472,10 @@ class MemoryManager:
         except Exception:
             pass
         # 降级：按原始顺序返回
-        return [(id, doc) for id, (doc, _, _) in candidates.items()]
+        return [(mem_id, doc) for mem_id, (doc, _, _) in candidates.items()]
 
-    def _synthesize(self, query: str, top_candidates: list[tuple[str, str]]) -> str:
-        """合成 LLM 整合 top-K 结果。"""
+    def _synthesize_streaming(self, query: str, top_candidates: list[tuple[str, str]],) -> Generator[StreamEvent, None, str]:
+        """流式合成 LLM 整合 top-K 结果，yield thinking/text delta，return 最终回答。"""
         if not top_candidates:
             return "No relevant memory."
 
@@ -401,6 +501,12 @@ class MemoryManager:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=self._synthesize_max_output_tokens,
             ) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta":
+                        if event.delta.type == "thinking_delta":
+                            yield StreamEvent(type=EventType.RECALL_SYNTH_THINKING, delta=event.delta.thinking)
+                        elif event.delta.type == "text_delta":
+                            yield StreamEvent(type=EventType.RECALL_SYNTH_TEXT, delta=event.delta.text)
                 response = stream.get_final_message()
             text_parts = [
                 getattr(block, "text", "")
