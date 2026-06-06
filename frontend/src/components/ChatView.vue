@@ -234,8 +234,9 @@ function mdHtml(text: string): string {
       </div>
     </header>
 
-    <!-- 消息列表 -->
-    <div class="chat-messages" ref="chatEl" @scroll="onScroll">
+    <!-- 消息区（子面板打开时隐藏） -->
+    <div class="chat-body-wrapper">
+    <div v-if="subPanelStack.length === 0" class="chat-messages" ref="chatEl" @scroll="onScroll">
       <div v-if="messages.length === 0" class="empty-hint">
         {{ hasSession ? '输入消息继续对话' : '输入消息开始新会话，或从左侧选择已有会话' }}
       </div>
@@ -380,21 +381,19 @@ function mdHtml(text: string): string {
       </div>
     </div>
 
-    <!-- ═══════════ 子面板 Overlay ═══════════ -->
-    <div v-if="subPanelStack.length > 0" class="recall-overlay" @click.self="closeAllSubPanels">
-      <div v-if="activeSubPanel" class="recall-panel">
-        <div class="recall-panel-header">
-          <button class="recall-back-btn" @click="closeSubPanelTop">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="7.5,2 3.5,6 7.5,10"/>
-            </svg>
-            返回对话
-          </button>
-          <div v-if="recallPanelData" class="recall-sub-title">Memory Recall<span v-if="recallPanelData.synth.query"> · {{ recallPanelData.synth.query }}</span></div>
-          <div v-else-if="subagentPanelData" class="recall-sub-title">Subagent · {{ subagentPanelData.agentType }}<span v-if="subagentPanelData.name"> · {{ subagentPanelData.name }}</span></div>
-        </div>
+    <div v-if="subPanelStack.length > 0" class="sub-panel-view">
+      <div class="sub-panel-topbar">
+        <button class="recall-back-btn" @click="closeSubPanelTop">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="7.5,2 3.5,6 7.5,10"/>
+          </svg>
+          返回对话
+        </button>
+        <div v-if="recallPanelData" class="recall-sub-title">Memory Recall<span v-if="recallPanelData.synth.query"> · {{ recallPanelData.synth.query }}</span></div>
+        <div v-else-if="subagentPanelData" class="recall-sub-title">Subagent · {{ subagentPanelData.agentType }}<span v-if="subagentPanelData.name"> · {{ subagentPanelData.name }}</span></div>
+      </div>
 
-        <!-- ═══════════ Recall Memory Body ═══════════ -->
+      <!-- ═══════════ Recall Memory Body ═══════════ -->
         <div v-if="recallPanelData" ref="recallBodyEl" class="recall-panel-body" @scroll="onRecallScroll">
 
           <!-- ── Stage 1: Expand ── -->
@@ -587,11 +586,11 @@ function mdHtml(text: string): string {
             class="cursor"
           >|</span>
         </div>
-      </div>
+    </div>
     </div>
 
-    <!-- 输入区域 -->
-    <div class="chat-input-area">
+    <!-- ═══════════ 输入区域（有子面板时隐藏） ═══════════ -->
+    <div v-if="subPanelStack.length === 0" class="chat-input-area">
       <div class="input-row">
         <textarea
           ref="inputEl"
@@ -1117,22 +1116,24 @@ textarea::placeholder { color: var(--fg-muted); }
 }
 .detail-btn-inline:hover { background: rgba(6,182,212,0.15); }
 
-/* ======================== Recall Sub-Panel Overlay ======================== */
-.recall-overlay {
-  position: fixed; inset: 0; z-index: 200;
-  background: rgba(26,26,26,0.08); backdrop-filter: blur(2px);
-  display: flex; justify-content: center; align-items: flex-start;
-  padding-top: 48px;
+/* ======================== Sub-Panel Inline ======================== */
+.chat-body-wrapper {
+  flex: 1; position: relative; overflow: hidden;
+  display: flex; flex-direction: column;
 }
-.recall-panel {
-  width: 700px; max-width: 96vw; max-height: 82vh;
-  background: var(--bg); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+.sub-panel-view {
+  flex: 1; position: relative; display: flex; flex-direction: column; overflow: hidden;
 }
-.recall-panel-header {
+.sub-panel-topbar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 10;
   display: flex; align-items: center; gap: 10px; flex-shrink: 0;
-  padding: 12px 18px; border-bottom: 1px solid var(--border-light); background: var(--surface-hover);
+  margin: 6.8px 20px 0;
+  padding: 10px 18px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 251, 235, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 .recall-back-btn {
   display: flex; align-items: center; gap: 4px;
@@ -1148,7 +1149,7 @@ textarea::placeholder { color: var(--fg-muted); }
 }
 .recall-sub-title span { color: var(--fg-muted); font-weight: 400; }
 
-.recall-panel-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+.recall-panel-body { flex: 1; overflow-y: auto; padding: 68px 20px 16px; background: var(--bg); }
 .recall-panel-body::-webkit-scrollbar { width: 5px; }
 .recall-panel-body::-webkit-scrollbar-track {
   background: transparent;
