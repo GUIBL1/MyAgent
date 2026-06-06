@@ -133,6 +133,7 @@ function _createChat() {
   const sessions: Ref<SessionInfo[]> = ref([])
   const currentSessionId: Ref<string | null> = ref(null)
   const hasSession = ref(false) // 是否有活跃会话（已发送过消息）
+  const tokenUsage = ref<{ used: number; total: number } | null>(null)
 
   // 子面板栈：支持嵌套（subagent 内调用 recall_memory 等场景）
   // 栈顶为当前可见的子面板；未来扩展其他 tool_name 时，在 .data 上做 union
@@ -469,6 +470,17 @@ function _createChat() {
           isStreaming.value = false
         }
       }
+
+    // === Token 用量 — 更新右侧面板 ===
+
+    } else if (type === 'token_usage') {
+      // 主 agent 和 subagent 的 token_usage 都累积到同一个计数器
+      try {
+        const d = JSON.parse(data.content || '{}')
+        if (typeof d.used === 'number' && typeof d.total === 'number') {
+          tokenUsage.value = { used: d.used, total: d.total }
+        }
+      } catch { /* ignore parse error */ }
 
     // === 状态事件 — 作为 block 插入当前 assistant 消息 ===
 
@@ -1098,5 +1110,5 @@ function _createChat() {
     return rebuilt
   }
 
-  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, connect, send, switchSession, newSession, rewindToTurn }
+  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, tokenUsage, connect, send, switchSession, newSession, rewindToTurn }
 }

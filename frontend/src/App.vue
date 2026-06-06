@@ -5,7 +5,7 @@ import ChatView from './components/ChatView.vue'
 import SidePanel from './components/SidePanel.vue'
 import SessionList from './components/SessionList.vue'
 
-const { sessions, currentSessionId, isStreaming, switchSession, newSession } = useChat()
+const { sessions, currentSessionId, isStreaming, tokenUsage, switchSession, newSession } = useChat()
 
 const showLeft = ref(false)
 const showRight = ref(false)
@@ -94,7 +94,24 @@ onUnmounted(() => stopDrag())
       title="状态"
       @close="showRight = false"
     >
-      <div class="placeholder">Todo / Skill / MCP / Teammate（占位）</div>
+      <!-- Token 用量 -->
+      <div class="token-section">
+        <div class="token-section-title">Token 用量</div>
+        <div v-if="tokenUsage" class="token-bar-wrap">
+          <div class="token-bar">
+            <div
+              class="token-bar-fill"
+              :style="{ width: Math.min(100, (tokenUsage.used / tokenUsage.total) * 100) + '%' }"
+              :class="{ warn: tokenUsage.used / tokenUsage.total > 0.8 }"
+            ></div>
+          </div>
+          <div class="token-stats">
+            <span>{{ tokenUsage.used.toLocaleString() }} / {{ tokenUsage.total.toLocaleString() }}</span>
+            <span class="token-pct">{{ Math.round((tokenUsage.used / tokenUsage.total) * 100) }}%</span>
+          </div>
+        </div>
+        <div v-else class="token-empty">等待用量数据…</div>
+      </div>
     </SidePanel>
   </div>
 </template>
@@ -134,6 +151,49 @@ onUnmounted(() => stopDrag())
 .drag-handle.active::after {
   background: var(--amber);
   height: 60px;
+}
+
+/* ======================== Token Usage ======================== */
+.token-section {
+  margin-bottom: 16px;
+}
+.token-section-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+}
+.token-bar-wrap {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.token-bar {
+  width: 100%; height: 6px;
+  background: var(--border-light);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.token-bar-fill {
+  height: 100%;
+  background: var(--amber);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.token-bar-fill.warn {
+  background: var(--red);
+}
+.token-stats {
+  display: flex; justify-content: space-between;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--fg-muted);
+}
+.token-pct {
+  font-weight: 500; color: var(--fg-secondary);
+}
+.token-empty {
+  color: var(--fg-muted);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
 }
 
 /* ======================== Placeholder ======================== */

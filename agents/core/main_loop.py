@@ -145,7 +145,7 @@ class MainLoop:
 
             yield StreamEvent(
                 type=EventType.TOKEN_USAGE,
-                content=f"本轮: {total_tokens} tokens (in: {response.usage.input_tokens}, out: {response.usage.output_tokens})",
+                content=json.dumps({"used": total_tokens, "total": self._token_threshold}, ensure_ascii=False),
             )
 
             assistant_content = [b.model_dump(exclude_none=True) for b in response.content]

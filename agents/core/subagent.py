@@ -116,11 +116,6 @@ class SubAgent:
 
             total_tokens = response.usage.input_tokens + response.usage.output_tokens
 
-            yield StreamEvent(
-                type=EventType.TOKEN_USAGE,
-                content=f"本轮: {total_tokens} tokens (in: {response.usage.input_tokens}, out: {response.usage.output_tokens})",
-            )
-
             messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in response.content]})
 
             if response.stop_reason != "tool_use":
