@@ -228,6 +228,13 @@ class MainLoop:
                     used_todo = True
                     if isinstance(block.input, dict):
                         todo_agent_name = block.input.get("name", todo_agent_name)
+                        todo_items = block.input.get("todo_list", [])
+                        yield StreamEvent(
+                            type=EventType.TODO_UPDATE,
+                            content=json.dumps({
+                                "items": todo_items,
+                            }, ensure_ascii=False),
+                        )
 
                 if block.name == "run_background_task":
                     if isinstance(block.input, dict):

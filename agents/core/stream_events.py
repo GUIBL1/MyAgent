@@ -42,6 +42,7 @@ class EventType(Enum):
     BACKGROUND_NOTIFICATION = "background_notification"
     INBOX_MESSAGE = "inbox_message"
     TODO_REMINDER = "todo_reminder"
+    TODO_UPDATE = "todo_update"
     TOKEN_USAGE = "token_usage"
 
     # === Memory Recall 管道事件 ===
@@ -91,7 +92,8 @@ class StreamEvent:
     │ BACKGROUND_NOTIFICATION│ content                            │
     │ INBOX_MESSAGE        │ content                              │
     │ TODO_REMINDER        │ content                              │
-    │ TOKEN_USAGE          │ content                              │
+    │ TODO_UPDATE          │ content (JSON: agent_name + items)   │
+    │ TOKEN_USAGE          │ content (JSON: used + total)         │
     │ RECALL_EXPAND_START  │ content                              │
     │ RECALL_EXPAND_THINKING│ delta                                │
     │ RECALL_EXPAND_TEXT   │ delta                                │

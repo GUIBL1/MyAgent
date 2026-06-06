@@ -5,7 +5,7 @@ import ChatView from './components/ChatView.vue'
 import SidePanel from './components/SidePanel.vue'
 import SessionList from './components/SessionList.vue'
 
-const { sessions, currentSessionId, isStreaming, tokenUsage, switchSession, newSession } = useChat()
+const { sessions, currentSessionId, isStreaming, tokenUsage, todoList, switchSession, newSession } = useChat()
 
 const showLeft = ref(false)
 const showRight = ref(false)
@@ -112,6 +112,23 @@ onUnmounted(() => stopDrag())
         </div>
         <div v-else class="token-empty">等待用量数据…</div>
       </div>
+
+      <!-- Todo 列表 -->
+      <div class="todo-section">
+        <div class="todo-section-title">Todo</div>
+        <div v-if="todoList.length" class="todo-items">
+          <div
+            v-for="(item, i) in todoList"
+            :key="i"
+            class="todo-item"
+            :class="item.status"
+          >
+            <span class="todo-status-dot" :class="item.status"></span>
+            <span class="todo-content">{{ item.content }}</span>
+          </div>
+        </div>
+        <div v-else class="todo-empty">暂无 todo 项</div>
+      </div>
     </SidePanel>
   </div>
 </template>
@@ -191,6 +208,52 @@ onUnmounted(() => stopDrag())
   font-weight: 500; color: var(--fg-secondary);
 }
 .token-empty {
+  color: var(--fg-muted);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+}
+
+/* ======================== Todo List ======================== */
+.todo-section {
+  margin-bottom: 16px;
+}
+.todo-section-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+}
+.todo-items {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.todo-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+  font-family: 'DM Sans', sans-serif; font-size: 12px; line-height: 1.5;
+  color: var(--fg-secondary);
+}
+.todo-item.in_progress {
+  background: var(--amber-subtle);
+  border-color: rgba(217, 119, 6, 0.15);
+  color: var(--fg);
+}
+.todo-item.completed {
+  opacity: 0.55;
+}
+.todo-item.completed .todo-content {
+  text-decoration: line-through;
+}
+.todo-status-dot {
+  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
+  margin-top: 4px;
+  background: var(--border);
+}
+.todo-status-dot.in_progress { background: var(--amber); }
+.todo-status-dot.completed { background: var(--green); }
+.todo-empty {
   color: var(--fg-muted);
   font-family: 'DM Sans', sans-serif;
   font-size: 12px;

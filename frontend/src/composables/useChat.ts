@@ -134,6 +134,7 @@ function _createChat() {
   const currentSessionId: Ref<string | null> = ref(null)
   const hasSession = ref(false) // 是否有活跃会话（已发送过消息）
   const tokenUsage = ref<{ used: number; total: number } | null>(null)
+  const todoList = ref<{ content: string; status: string }[]>([])
 
   // 子面板栈：支持嵌套（subagent 内调用 recall_memory 等场景）
   // 栈顶为当前可见的子面板；未来扩展其他 tool_name 时，在 .data 上做 union
@@ -369,12 +370,17 @@ function _createChat() {
     if (type === 'session_created') {
       currentSessionId.value = data.session_id
       hasSession.value = true
+      tokenUsage.value = null
+      todoList.value = []
       return
     }
 
     if (type === 'session_state') {
       currentSessionId.value = data.session_id
       hasSession.value = !!data.session_id
+      // 先恢复默认，再回放历史事件逐步填充
+      tokenUsage.value = null
+      todoList.value = []
       messages.value = rebuildFromTranscript(data.transcript || [])
       isStreaming.value = false
       return
@@ -479,6 +485,14 @@ function _createChat() {
         const d = JSON.parse(data.content || '{}')
         if (typeof d.used === 'number' && typeof d.total === 'number') {
           tokenUsage.value = { used: d.used, total: d.total }
+        }
+      } catch { /* ignore parse error */ }
+
+    } else if (type === 'todo_update') {
+      try {
+        const d = JSON.parse(data.content || '{}')
+        if (Array.isArray(d.items)) {
+          todoList.value = d.items
         }
       } catch { /* ignore parse error */ }
 
@@ -917,7 +931,27 @@ function _createChat() {
       }
 
       // 上下文入口 / 统计信息 → 跳过
-      if (et === 'context_entry' || et === 'token_usage' || et === 'context_patch') {
+      if (et === 'context_entry' || et === 'context_patch') {
+        continue
+      }
+
+      // token_usage / todo_update → 更新右侧面板（回放时同样生效）
+      if (et === 'token_usage') {
+        try {
+          const d = JSON.parse(entry.content || '{}')
+          if (typeof d.used === 'number' && typeof d.total === 'number') {
+            tokenUsage.value = { used: d.used, total: d.total }
+          }
+        } catch { /* ignore */ }
+        continue
+      }
+      if (et === 'todo_update') {
+        try {
+          const d = JSON.parse(entry.content || '{}')
+          if (Array.isArray(d.items)) {
+            todoList.value = d.items
+          }
+        } catch { /* ignore */ }
         continue
       }
 
@@ -1110,5 +1144,5 @@ function _createChat() {
     return rebuilt
   }
 
-  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, tokenUsage, connect, send, switchSession, newSession, rewindToTurn }
+  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, tokenUsage, todoList, connect, send, switchSession, newSession, rewindToTurn }
 }
