@@ -57,7 +57,7 @@ class SubAgent:
         prompt: str,
         agent_type: str = "explore",
         name: str = ""
-    ) -> Iterator[StreamEvent]:
+    ) -> Iterator[StreamEvent | str]:
         """运行 subagent 循环，yield 事件流，最终 return 文本摘要。"""
         system_prompt = self._build_system_prompt(name)
         tools = self._explore_subagent_tools if agent_type == "explore" else self._general_subagent_tools
@@ -111,7 +111,8 @@ class SubAgent:
                     type=EventType.ERROR,
                     error_msg=f"LLM API error: {exc}",
                 )
-                return f"Subagent failed: LLM API error {exc}"
+                yield f"Subagent failed: LLM API error {exc}"
+                return
 
             total_tokens = response.usage.input_tokens + response.usage.output_tokens
 
@@ -145,29 +146,59 @@ class SubAgent:
 
                 handler = self._handlers.get(tool_name)
                 try:
-                    output = (
+                    handler_output = (
                         handler(**tool_input)
                         if handler
                         else f"Unknown tool: {tool_name}."
                     )
                 except Exception as exc:
-                    output = f"Tool {tool_name} failed with error: {exc}"
                     yield StreamEvent(
                         type=EventType.ERROR,
                         tool_id=block.id,
                         error_msg=str(exc),
                     )
+                    handler_output = f"Tool {tool_name} failed with error: {exc}"
+
+                if isinstance(handler_output, str):
+                    tool_result_content = handler_output
+                elif hasattr(handler_output, '__iter__'):
+                    # Generator handler（如 recall_memory）：逐事件流式推送
+                    sub_panel_opened = False
+                    final_result = ""
+                    try:
+                        for item in handler_output:
+                            if isinstance(item, StreamEvent):
+                                if not sub_panel_opened:
+                                    yield StreamEvent(
+                                        type=EventType.SUB_PANEL_ENTER,
+                                        tool_id=block.id,
+                                        tool_name=tool_name,
+                                    )
+                                    sub_panel_opened = True
+                                yield item
+                            else:
+                                final_result = item
+                        tool_result_content = str(final_result) if final_result else ""
+                    except Exception as exc:
+                        tool_result_content = f"Tool execution error: {exc}"
+                    if sub_panel_opened:
+                        yield StreamEvent(
+                            type=EventType.SUB_PANEL_EXIT,
+                            tool_id=block.id,
+                        )
+                else:
+                    tool_result_content = str(handler_output)
 
                 yield StreamEvent(
                     type=EventType.TOOL_RESULT,
                     tool_id=block.id,
-                    content=str(output),
+                    content=tool_result_content,
                 )
 
                 result_entry = {
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": str(output),
+                    "content": tool_result_content,
                 }
                 results.append(result_entry)
 
@@ -190,5 +221,6 @@ class SubAgent:
                 if hasattr(block, "text")
             ]
             summary = "\n".join(text_parts).strip()
-            return summary or "No summary."
-        return "Subagent failed."
+            yield summary or "No summary."
+        else:
+            yield "Subagent failed."

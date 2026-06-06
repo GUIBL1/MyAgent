@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, nextTick, watch } from 'vue'
 import { useChat } from '../composables/useChat'
+import type { RecallMemoryBlock, SubagentBlock } from '../composables/useChat'
 import { renderMarkdown } from '../utils/markdown'
 
 const props = defineProps<{
@@ -16,12 +17,21 @@ const emit = defineEmits<{
 const { messages, isStreaming, wsStatus, hasSession, subPanelStack, connect, send } = useChat()
 const activeSubPanel = computed(() => {
   const top = subPanelStack.value[subPanelStack.value.length - 1]
-  return top ? top.data : null
+  return top || null
+})
+const recallPanelData = computed(() => {
+  if (!activeSubPanel.value || activeSubPanel.value.toolName !== 'recall_memory') return null
+  return activeSubPanel.value.data as RecallMemoryBlock
+})
+const subagentPanelData = computed(() => {
+  if (!activeSubPanel.value || activeSubPanel.value.toolName !== 'use_subagent') return null
+  return activeSubPanel.value.data as SubagentBlock
 })
 const input = ref('')
 const chatEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const recallBodyEl = ref<HTMLElement | null>(null)
+const subagentBodyEl = ref<HTMLElement | null>(null)
 
 onMounted(() => connect())
 
@@ -45,11 +55,27 @@ function onRecallScroll() {
   const { scrollTop, scrollHeight, clientHeight } = recallBodyEl.value
   recallAutoScroll = scrollHeight - scrollTop - clientHeight < 60
 }
-watch(() => activeSubPanel.value, () => {
+watch(() => recallPanelData.value, () => {
   if (!recallAutoScroll) return
   nextTick(() => {
     if (recallBodyEl.value) {
       recallBodyEl.value.scrollTop = recallBodyEl.value.scrollHeight
+    }
+  })
+}, { deep: true })
+
+// Subagent 子面板滚动
+let subagentAutoScroll = true
+function onSubagentScroll() {
+  if (!subagentBodyEl.value) return
+  const { scrollTop, scrollHeight, clientHeight } = subagentBodyEl.value
+  subagentAutoScroll = scrollHeight - scrollTop - clientHeight < 60
+}
+watch(() => subagentPanelData.value, () => {
+  if (!subagentAutoScroll) return
+  nextTick(() => {
+    if (subagentBodyEl.value) {
+      subagentBodyEl.value.scrollTop = subagentBodyEl.value.scrollHeight
     }
   })
 }, { deep: true })
@@ -92,12 +118,60 @@ function handleKeydown(e: KeyboardEvent) {
 // ---- Recall sub-panel ----
 function openRecallDetail(block: any) {
   recallAutoScroll = true
+  // 优先在 subagent 子面板内查找（若当前面板为 subagent）
+  if (subagentPanelData.value) {
+    for (const msg of subagentPanelData.value.messages) {
+      for (const b of msg.blocks) {
+        if (b.type === 'recall_memory' && b.toolId === block.id) {
+          subPanelStack.value.push({ toolId: block.id, toolName: 'recall_memory', data: b as any })
+          nextTick(() => {
+            if (recallBodyEl.value) recallBodyEl.value.scrollTop = recallBodyEl.value.scrollHeight
+          })
+          return
+        }
+      }
+    }
+  }
+  // 其次在主聊天区的所有 subagent block 内查找
+  for (const chatMsg of messages.value) {
+    for (const b of chatMsg.blocks) {
+      if (b.type === 'subagent') {
+        for (const saMsg of (b as SubagentBlock).messages) {
+          for (const sblk of saMsg.blocks) {
+            if (sblk.type === 'recall_memory' && sblk.toolId === block.id) {
+              subPanelStack.value.push({ toolId: block.id, toolName: 'recall_memory', data: sblk as any })
+              nextTick(() => {
+                if (recallBodyEl.value) recallBodyEl.value.scrollTop = recallBodyEl.value.scrollHeight
+              })
+              return
+            }
+          }
+        }
+      }
+    }
+  }
+  // 最后在主聊天区直接查找（现有行为）
   for (const msg of messages.value) {
     for (const b of msg.blocks) {
       if (b.type === 'recall_memory' && b.toolId === block.id) {
         subPanelStack.value.push({ toolId: block.id, toolName: 'recall_memory', data: b as any })
         nextTick(() => {
           if (recallBodyEl.value) recallBodyEl.value.scrollTop = recallBodyEl.value.scrollHeight
+        })
+        return
+      }
+    }
+  }
+}
+
+function openSubagentDetail(block: any) {
+  subagentAutoScroll = true
+  for (const msg of messages.value) {
+    for (const b of msg.blocks) {
+      if (b.type === 'subagent' && b.toolId === block.id) {
+        subPanelStack.value.push({ toolId: block.id, toolName: 'use_subagent', data: b as any })
+        nextTick(() => {
+          if (subagentBodyEl.value) subagentBodyEl.value.scrollTop = subagentBodyEl.value.scrollHeight
         })
         return
       }
@@ -202,6 +276,13 @@ function mdHtml(text: string): string {
                       </svg>
                       查看详情
                     </span>
+                    <span v-if="block.name === 'use_subagent'" class="detail-btn-inline" @click.prevent.stop="openSubagentDetail(block)">
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                        <circle cx="5.5" cy="5.5" r="4"/><line x1="9" y1="9" x2="11" y2="11"/>
+                        <line x1="5.5" y1="3.5" x2="5.5" y2="7.5"/><line x1="3.5" y1="5.5" x2="7.5" y2="5.5"/>
+                      </svg>
+                      查看详情
+                    </span>
                     <span class="tool-meta" :class="block.status">{{ block.status === 'running' ? '执行中…' : '完成' }}</span>
                   </span>
                 </summary>
@@ -299,7 +380,7 @@ function mdHtml(text: string): string {
       </div>
     </div>
 
-    <!-- ═══════════ Recall Memory 子面板 Overlay ═══════════ -->
+    <!-- ═══════════ 子面板 Overlay ═══════════ -->
     <div v-if="subPanelStack.length > 0" class="recall-overlay" @click.self="closeAllSubPanels">
       <div v-if="activeSubPanel" class="recall-panel">
         <div class="recall-panel-header">
@@ -309,52 +390,55 @@ function mdHtml(text: string): string {
             </svg>
             返回对话
           </button>
-          <div class="recall-sub-title">Memory Recall<span v-if="activeSubPanel.synth.query"> · {{ activeSubPanel.synth.query }}</span></div>
+          <div v-if="recallPanelData" class="recall-sub-title">Memory Recall<span v-if="recallPanelData.synth.query"> · {{ recallPanelData.synth.query }}</span></div>
+          <div v-else-if="subagentPanelData" class="recall-sub-title">Subagent · {{ subagentPanelData.agentType }}<span v-if="subagentPanelData.name"> · {{ subagentPanelData.name }}</span></div>
         </div>
-        <div ref="recallBodyEl" class="recall-panel-body" @scroll="onRecallScroll">
+
+        <!-- ═══════════ Recall Memory Body ═══════════ -->
+        <div v-if="recallPanelData" ref="recallBodyEl" class="recall-panel-body" @scroll="onRecallScroll">
 
           <!-- ── Stage 1: Expand ── -->
-          <div class="recall-stage recall-stage-expand" :class="activeSubPanel.expand.status">
-            <details :open="activeSubPanel.expand.status !== 'pending'">
+          <div class="recall-stage recall-stage-expand" :class="recallPanelData.expand.status">
+            <details :open="recallPanelData.expand.status !== 'pending'">
               <summary>
                 <span class="recall-stage-dot"></span>
                 STAGE 1 · Query Expansion
-                <span class="recall-stage-badge">{{ activeSubPanel.expand.status === 'running' ? '执行中' : activeSubPanel.expand.status === 'done' ? '完成' : '等待中' }}</span>
+                <span class="recall-stage-badge">{{ recallPanelData.expand.status === 'running' ? '执行中' : recallPanelData.expand.status === 'done' ? '完成' : '等待中' }}</span>
               </summary>
               <div class="recall-stage-body">
-                <div v-if="activeSubPanel.expand.status !== 'pending'" class="recall-explain">将原始查询发给 LLM，生成 3–10 条不同角度表述的变体查询，覆盖同义词改写、抽象泛化、关键词组合等方向，提高召回覆盖度。</div>
-                <div v-if="activeSubPanel.expand.thinking" class="recall-think-block">
-                  <details :open="activeSubPanel.active && activeSubPanel.expand.status === 'running' && !activeSubPanel.expand.text"><summary>EXPANSION THINKING</summary>
-                    <div class="recall-think-content">{{ activeSubPanel.expand.thinking }}</div>
+                <div v-if="recallPanelData.expand.status !== 'pending'" class="recall-explain">将原始查询发给 LLM，生成 3–10 条不同角度表述的变体查询，覆盖同义词改写、抽象泛化、关键词组合等方向，提高召回覆盖度。</div>
+                <div v-if="recallPanelData.expand.thinking" class="recall-think-block">
+                  <details :open="recallPanelData.active && recallPanelData.expand.status === 'running' && !recallPanelData.expand.text"><summary>EXPANSION THINKING</summary>
+                    <div class="recall-think-content">{{ recallPanelData.expand.thinking }}</div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.expand.text" class="recall-text-block">
-                  <details :open="activeSubPanel.active && activeSubPanel.expand.status === 'running' && !!activeSubPanel.expand.text"><summary>EXPANSION OUTPUT</summary>
-                    <div class="recall-text-content">{{ activeSubPanel.expand.text }}</div>
+                <div v-if="recallPanelData.expand.text" class="recall-text-block">
+                  <details :open="recallPanelData.active && recallPanelData.expand.status === 'running' && !!recallPanelData.expand.text"><summary>EXPANSION OUTPUT</summary>
+                    <div class="recall-text-content">{{ recallPanelData.expand.text }}</div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.expand.variants.length" class="recall-variant-list">
-                  <div class="recall-variant-label">生成变体查询（含原始查询共 {{ activeSubPanel.expand.count }} 条）：</div>
-                  <div v-for="(v, vi) in activeSubPanel.expand.variants" :key="vi" class="recall-variant-item">
+                <div v-if="recallPanelData.expand.variants.length" class="recall-variant-list">
+                  <div class="recall-variant-label">生成变体查询（含原始查询共 {{ recallPanelData.expand.count }} 条）：</div>
+                  <div v-for="(v, vi) in recallPanelData.expand.variants" :key="vi" class="recall-variant-item">
                     <span class="recall-variant-idx">{{ vi + 1 }}</span><span>{{ v }}<span v-if="vi === 0" class="recall-variant-original">原始</span></span>
                   </div>
                 </div>
-                <span v-if="activeSubPanel.expand.status === 'running'" class="recall-blink">|</span>
+                <span v-if="recallPanelData.expand.status === 'running'" class="recall-blink">|</span>
               </div>
             </details>
           </div>
 
           <!-- ── Stage 2: Retrieve ── -->
-          <div class="recall-stage recall-stage-retrieve" :class="activeSubPanel.retrieve.status">
-            <details :open="activeSubPanel.retrieve.status !== 'pending'">
+          <div class="recall-stage recall-stage-retrieve" :class="recallPanelData.retrieve.status">
+            <details :open="recallPanelData.retrieve.status !== 'pending'">
               <summary>
                 <span class="recall-stage-dot"></span>
                 STAGE 2 · Multi-Query Retrieval
-                <span class="recall-stage-badge">{{ activeSubPanel.retrieve.status === 'running' ? '执行中' : activeSubPanel.retrieve.status === 'done' ? '完成' : '等待中' }}</span>
+                <span class="recall-stage-badge">{{ recallPanelData.retrieve.status === 'running' ? '执行中' : recallPanelData.retrieve.status === 'done' ? '完成' : '等待中' }}</span>
               </summary>
               <div class="recall-stage-body">
-                <div v-if="activeSubPanel.retrieve.status !== 'pending'" class="recall-explain">将每条变体查询转为向量，分别检索 Chroma 向量数据库，去重合并候选记忆。</div>
-                <div v-for="(qr, qri) in activeSubPanel.retrieve.queries" :key="qri" class="recall-query-card">
+                <div v-if="recallPanelData.retrieve.status !== 'pending'" class="recall-explain">将每条变体查询转为向量，分别检索 Chroma 向量数据库，去重合并候选记忆。</div>
+                <div v-for="(qr, qri) in recallPanelData.retrieve.queries" :key="qri" class="recall-query-card">
                   <details :open="qr.active">
                     <summary class="recall-qr-header">查询 <code>{{ qr.query }}</code><span class="recall-qr-hits">{{ qr.error ? '失败' : qr.active ? '查询中…' : qr.hit_count + ' 条命中' }}</span></summary>
                     <div v-if="qr.error" class="recall-qr-error">{{ qr.error }}</div>
@@ -365,82 +449,143 @@ function mdHtml(text: string): string {
                     </div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.retrieve.status === 'done'" class="recall-retrieve-summary">去重后共 <strong>{{ activeSubPanel.retrieve.total_candidates }}</strong> 条候选记忆</div>
+                <div v-if="recallPanelData.retrieve.status === 'done'" class="recall-retrieve-summary">去重后共 <strong>{{ recallPanelData.retrieve.total_candidates }}</strong> 条候选记忆</div>
               </div>
             </details>
           </div>
 
           <!-- ── Stage 3: Rerank ── -->
-          <div class="recall-stage recall-stage-rerank" :class="activeSubPanel.rerank.status">
-            <details :open="activeSubPanel.rerank.status !== 'pending'">
+          <div class="recall-stage recall-stage-rerank" :class="recallPanelData.rerank.status">
+            <details :open="recallPanelData.rerank.status !== 'pending'">
               <summary>
                 <span class="recall-stage-dot"></span>
                 STAGE 3 · LLM Reranking
-                <span class="recall-stage-badge">{{ activeSubPanel.rerank.status === 'running' ? '执行中' : activeSubPanel.rerank.status === 'done' ? '完成' : '等待中' }}</span>
+                <span class="recall-stage-badge">{{ recallPanelData.rerank.status === 'running' ? '执行中' : recallPanelData.rerank.status === 'done' ? '完成' : '等待中' }}</span>
               </summary>
               <div class="recall-stage-body">
-                <div v-if="activeSubPanel.rerank.status !== 'pending'" class="recall-explain">将去重后的候选记忆送给重排序 LLM，按语义匹配度、向量距离、历史访问频率综合打分，输出降序排列。</div>
-                <div v-if="activeSubPanel.rerank.thinking" class="recall-think-block">
-                  <details :open="activeSubPanel.active && activeSubPanel.rerank.status === 'running' && !activeSubPanel.rerank.text"><summary>RERANK THINKING</summary>
-                    <div class="recall-think-content">{{ activeSubPanel.rerank.thinking }}</div>
+                <div v-if="recallPanelData.rerank.status !== 'pending'" class="recall-explain">将去重后的候选记忆送给重排序 LLM，按语义匹配度、向量距离、历史访问频率综合打分，输出降序排列。</div>
+                <div v-if="recallPanelData.rerank.thinking" class="recall-think-block">
+                  <details :open="recallPanelData.active && recallPanelData.rerank.status === 'running' && !recallPanelData.rerank.text"><summary>RERANK THINKING</summary>
+                    <div class="recall-think-content">{{ recallPanelData.rerank.thinking }}</div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.rerank.text" class="recall-text-block">
-                  <details :open="activeSubPanel.active && activeSubPanel.rerank.status === 'running' && !!activeSubPanel.rerank.text"><summary>RERANK OUTPUT</summary>
-                    <div class="recall-text-content">{{ activeSubPanel.rerank.text }}</div>
+                <div v-if="recallPanelData.rerank.text" class="recall-text-block">
+                  <details :open="recallPanelData.active && recallPanelData.rerank.status === 'running' && !!recallPanelData.rerank.text"><summary>RERANK OUTPUT</summary>
+                    <div class="recall-text-content">{{ recallPanelData.rerank.text }}</div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.rerank.ranked_ids.length" class="recall-ranked-list">
-                  <div class="recall-ranked-label">排序结果（top {{ activeSubPanel.rerank.top_k }} 送入合成）：</div>
-                  <div v-for="(rid, ri) in activeSubPanel.rerank.ranked_ids" :key="ri" class="recall-ranked-item" :class="{ 'recall-ranked-top': ri < activeSubPanel.rerank.top_k }">
+                <div v-if="recallPanelData.rerank.ranked_ids.length" class="recall-ranked-list">
+                  <div class="recall-ranked-label">排序结果（top {{ recallPanelData.rerank.top_k }} 送入合成）：</div>
+                  <div v-for="(rid, ri) in recallPanelData.rerank.ranked_ids" :key="ri" class="recall-ranked-item" :class="{ 'recall-ranked-top': ri < recallPanelData.rerank.top_k }">
                     <span class="recall-rank-num">{{ ri + 1 }}</span>
                     <span class="recall-rank-id">{{ rid }}</span>
-                    <span v-if="ri >= activeSubPanel.rerank.top_k" class="recall-rank-skip">舍弃</span>
+                    <span v-if="ri >= recallPanelData.rerank.top_k" class="recall-rank-skip">舍弃</span>
                   </div>
                 </div>
-                <span v-if="activeSubPanel.rerank.status === 'running'" class="recall-blink">|</span>
+                <span v-if="recallPanelData.rerank.status === 'running'" class="recall-blink">|</span>
               </div>
             </details>
           </div>
 
           <!-- ── Stage 4: Synthesize ── -->
-          <div class="recall-stage recall-stage-synth" :class="activeSubPanel.synth.status">
-            <details :open="activeSubPanel.synth.status !== 'pending'">
+          <div class="recall-stage recall-stage-synth" :class="recallPanelData.synth.status">
+            <details :open="recallPanelData.synth.status !== 'pending'">
               <summary>
                 <span class="recall-stage-dot"></span>
                 STAGE 4 · LLM Synthesis
-                <span class="recall-stage-badge">{{ activeSubPanel.synth.status === 'running' ? '执行中' : activeSubPanel.synth.status === 'done' ? '完成' : '等待中' }}</span>
+                <span class="recall-stage-badge">{{ recallPanelData.synth.status === 'running' ? '执行中' : recallPanelData.synth.status === 'done' ? '完成' : '等待中' }}</span>
               </summary>
               <div class="recall-stage-body">
-                <div v-if="activeSubPanel.synth.status !== 'pending'" class="recall-explain">将重排结果组装为记忆片段列表，送合成 LLM 生成面向原始查询的最终回答。如有矛盾以索引小的片段为准。</div>
-                <div v-if="activeSubPanel.synth.fragments.length" class="recall-synth-input">
-                  <details :open="activeSubPanel.active && activeSubPanel.synth.status === 'running' && !activeSubPanel.synth.thinking && !activeSubPanel.synth.text"><summary class="recall-si-header">合成输入 · {{ activeSubPanel.synth.fragments.length }} 条记忆片段</summary>
+                <div v-if="recallPanelData.synth.status !== 'pending'" class="recall-explain">将重排结果组装为记忆片段列表，送合成 LLM 生成面向原始查询的最终回答。如有矛盾以索引小的片段为准。</div>
+                <div v-if="recallPanelData.synth.fragments.length" class="recall-synth-input">
+                  <details :open="recallPanelData.active && recallPanelData.synth.status === 'running' && !recallPanelData.synth.thinking && !recallPanelData.synth.text"><summary class="recall-si-header">合成输入 · {{ recallPanelData.synth.fragments.length }} 条记忆片段</summary>
                     <div class="recall-si-body">
-                      <div v-for="(f, fi) in activeSubPanel.synth.fragments" :key="fi">
+                      <div v-for="(f, fi) in recallPanelData.synth.fragments" :key="fi">
                         <span class="recall-frag-tag">[{{ f.index }}]</span> {{ f.content }}
                       </div>
                     </div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.synth.thinking" class="recall-think-block">
-                  <details :open="activeSubPanel.active && activeSubPanel.synth.status === 'running' && !activeSubPanel.synth.text"><summary>SYNTHESIS THINKING</summary>
-                    <div class="recall-think-content">{{ activeSubPanel.synth.thinking }}</div>
+                <div v-if="recallPanelData.synth.thinking" class="recall-think-block">
+                  <details :open="recallPanelData.active && recallPanelData.synth.status === 'running' && !recallPanelData.synth.text"><summary>SYNTHESIS THINKING</summary>
+                    <div class="recall-think-content">{{ recallPanelData.synth.thinking }}</div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.synth.text" class="recall-text-block">
-                  <details :open="activeSubPanel.active && activeSubPanel.synth.status === 'running' && !!activeSubPanel.synth.text"><summary>SYNTHESIS OUTPUT</summary>
-                    <div class="recall-text-content">{{ activeSubPanel.synth.text }}</div>
+                <div v-if="recallPanelData.synth.text" class="recall-text-block">
+                  <details :open="recallPanelData.active && recallPanelData.synth.status === 'running' && !!recallPanelData.synth.text"><summary>SYNTHESIS OUTPUT</summary>
+                    <div class="recall-text-content">{{ recallPanelData.synth.text }}</div>
                   </details>
                 </div>
-                <div v-if="activeSubPanel.synth.result" class="recall-final-result">
+                <div v-if="recallPanelData.synth.result" class="recall-final-result">
                   <div class="recall-fr-label">合成结果</div>
-                  <div class="md-body" v-html="mdHtml(activeSubPanel.synth.result)"></div>
+                  <div class="md-body" v-html="mdHtml(recallPanelData.synth.result)"></div>
                 </div>
-                <span v-if="activeSubPanel.synth.status === 'running'" class="recall-blink">|</span>
+                <span v-if="recallPanelData.synth.status === 'running'" class="recall-blink">|</span>
               </div>
             </details>
           </div>
 
+        </div>
+
+        <!-- ═══════════ Subagent Body ═══════════ -->
+        <div v-else-if="subagentPanelData" ref="subagentBodyEl" class="recall-panel-body subagent-panel-body" @scroll="onSubagentScroll">
+          <template v-for="(msg, mi) in subagentPanelData.messages" :key="mi">
+            <div class="subagent-msg">
+              <div class="subagent-msg-body">
+                <template v-for="(block, bi) in msg.blocks" :key="bi">
+                  <!-- 思考块 -->
+                  <div v-if="block.type === 'thinking'" class="thinking">
+                    <details :open="block.active">
+                      <summary>思考过程</summary>
+                      <div class="thinking-content md-body" v-html="mdHtml(block.content)"></div>
+                    </details>
+                  </div>
+
+                  <!-- 工具调用 -->
+                  <div v-else-if="block.type === 'tool'" class="tool-call" :class="block.status">
+                    <details :open="block.status === 'running'">
+                      <summary class="tool-header">
+                        <span class="tool-dot"></span>
+                        <code>{{ block.name }}</code>
+                        <span class="tool-summary-right">
+                          <span v-if="block.name === 'recall_memory'" class="detail-btn-inline" @click.prevent.stop="openRecallDetail(block)">
+                            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                              <circle cx="5.5" cy="5.5" r="4"/><line x1="9" y1="9" x2="11" y2="11"/>
+                              <line x1="5.5" y1="3.5" x2="5.5" y2="7.5"/><line x1="3.5" y1="5.5" x2="7.5" y2="5.5"/>
+                            </svg>
+                            查看详情
+                          </span>
+                          <span class="tool-meta" :class="block.status">{{ block.status === 'running' ? '执行中…' : '完成' }}</span>
+                        </span>
+                      </summary>
+                      <div class="tool-body">
+                        <div class="tool-input"><pre>{{ JSON.stringify(block.input, null, 2) }}</pre></div>
+                        <div v-if="block.result" class="tool-result">
+                          <pre>{{ block.result }}</pre>
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+
+                  <!-- 文本块 -->
+                  <div
+                    v-else-if="block.type === 'text'"
+                    class="subagent-text md-body"
+                    v-html="mdHtml(block.content)"
+                  ></div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- 空状态 -->
+          <div v-if="subagentPanelData.messages.length === 0" class="subagent-empty">等待 subagent 输出…</div>
+
+          <!-- 流式光标 -->
+          <span
+            v-if="subagentPanelData.status === 'running'"
+            class="cursor"
+          >|</span>
         </div>
       </div>
     </div>
@@ -1030,10 +1175,10 @@ textarea::placeholder { color: var(--fg-muted); }
 .recall-stage details > summary::-webkit-details-marker { display: none; }
 .recall-stage details > summary::before {
   content: ''; display: inline-block; flex-shrink: 0;
-  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
-  border-top: 5px solid currentColor; transition: transform 0.15s ease;
+  width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor; transition: transform 0.15s ease;
 }
-.recall-stage details[open] > summary::before { transform: rotate(180deg); }
+.recall-stage details[open] > summary::before { transform: rotate(90deg); }
 .recall-stage-body {
   padding: 0 14px 12px; font-size: 13px; line-height: 1.6;
   color: var(--fg-secondary); border-top: 1px solid var(--border-light);
@@ -1093,10 +1238,10 @@ textarea::placeholder { color: var(--fg-muted); }
 .recall-think-block summary::-webkit-details-marker { display: none; }
 .recall-think-block summary::before {
   content: ''; display: inline-block; flex-shrink: 0;
-  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
-  border-top: 5px solid var(--amber); transition: transform 0.15s ease;
+  width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--amber); transition: transform 0.15s ease;
 }
-.recall-think-block details[open] > summary::before { transform: rotate(180deg); }
+.recall-think-block details[open] > summary::before { transform: rotate(90deg); }
 .recall-think-content {
   padding: 4px 12px 10px; font-size: 12px; color: var(--fg-muted);
   font-style: italic; white-space: pre-wrap; border-top: 1px solid var(--border-light);
@@ -1121,10 +1266,10 @@ textarea::placeholder { color: var(--fg-muted); }
 .recall-text-block summary::-webkit-details-marker { display: none; }
 .recall-text-block summary::before {
   content: ''; display: inline-block; flex-shrink: 0;
-  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
-  border-top: 5px solid currentColor; transition: transform 0.15s ease;
+  width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor; transition: transform 0.15s ease;
 }
-.recall-text-block details[open] > summary::before { transform: rotate(180deg); }
+.recall-text-block details[open] > summary::before { transform: rotate(90deg); }
 .recall-text-content {
   padding: 4px 12px 10px; font-size: 12px; color: var(--fg-secondary);
   white-space: pre-wrap; font-family: 'JetBrains Mono', monospace;
@@ -1155,11 +1300,11 @@ textarea::placeholder { color: var(--fg-muted); }
 .recall-query-card details > summary::-webkit-details-marker { display: none; }
 .recall-query-card details > summary::before {
   content: ''; display: inline-block; flex-shrink: 0;
-  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
-  border-top: 5px solid var(--c-bg); transition: transform 0.15s ease;
+  width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--c-bg); transition: transform 0.15s ease;
   margin-right: 2px;
 }
-.recall-query-card details[open] > summary::before { transform: rotate(180deg); }
+.recall-query-card details[open] > summary::before { transform: rotate(90deg); }
 .recall-qr-header {
   display: flex; align-items: center; gap: 8px;
   padding: 7px 12px; font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
@@ -1228,10 +1373,10 @@ textarea::placeholder { color: var(--fg-muted); }
 .recall-si-header::-webkit-details-marker { display: none; }
 .recall-si-header::before {
   content: ''; display: inline-block; flex-shrink: 0;
-  width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent;
-  border-top: 5px solid var(--fg-muted); transition: transform 0.15s ease;
+  width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--fg-muted); transition: transform 0.15s ease;
 }
-.recall-synth-input details[open] > .recall-si-header::before { transform: rotate(180deg); }
+.recall-synth-input details[open] > .recall-si-header::before { transform: rotate(90deg); }
 .recall-synth-input details[open] > .recall-si-header {
   border-bottom: 1px solid var(--border-light);
 }
@@ -1259,5 +1404,30 @@ textarea::placeholder { color: var(--fg-muted); }
 .recall-blink {
   display: inline-block; color: var(--amber);
   animation: blink 0.8s step-end infinite; font-weight: 100; font-size: 1.1em;
+}
+
+/* ======================== Subagent Sub-Panel ======================== */
+.subagent-panel-body {
+  display: flex; flex-direction: column; gap: 16px;
+}
+.subagent-msg {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.subagent-msg-role {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-muted);
+}
+.subagent-msg-body { min-width: 0; }
+.subagent-text {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px; line-height: 1.65;
+  color: var(--fg);
+}
+.subagent-empty {
+  text-align: center; padding: 32px 0;
+  font-size: 13px; color: var(--fg-muted);
+  font-family: 'DM Sans', sans-serif;
 }
 </style>

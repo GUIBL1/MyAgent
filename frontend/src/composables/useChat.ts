@@ -68,6 +68,30 @@ function _emptyRecallBlock(toolId: string, active: boolean): RecallMemoryBlock {
   }
 }
 
+// ── Subagent 子面板数据结构 ──
+
+export interface SubagentMessage {
+  blocks: MessageBlock[]
+}
+
+export interface SubagentBlock {
+  type: 'subagent'
+  toolId: string
+  agentType: string
+  name: string
+  active: boolean
+  status: 'running' | 'done'
+  messages: SubagentMessage[]
+  summary?: string
+}
+
+function _emptySubagentBlock(toolId: string, agentType: string, name: string): SubagentBlock {
+  return {
+    type: 'subagent', toolId, agentType, name, active: true, status: 'running',
+    messages: [],
+  }
+}
+
 // ── MessageBlock union ──
 
 export type MessageBlock =
@@ -75,6 +99,7 @@ export type MessageBlock =
   | { type: 'thinking'; content: string; active: boolean }
   | { type: 'tool'; id: string; name: string; input: Record<string, unknown>; status: 'running' | 'done'; result?: string }
   | RecallMemoryBlock
+  | SubagentBlock
   | { type: 'micro_compact'; content: string }
   | { type: 'auto_compact'; content: string; thinking: string; summary: string; compactStatus: 'running' | 'done'; result?: string }
   | { type: 'background_notification'; content: string }
@@ -114,7 +139,7 @@ function _createChat() {
   interface SubPanelEntry {
     toolId: string
     toolName: string
-    data: RecallMemoryBlock  // 未来: RecallMemoryBlock | SubagentBlock | ...
+    data: RecallMemoryBlock | SubagentBlock
   }
   const subPanelStack: Ref<SubPanelEntry[]> = ref([])
 
@@ -132,6 +157,110 @@ function _createChat() {
     if (!last) return undefined
     const b = last.blocks[last.blocks.length - 1]
     return b?.type === 'recall_memory' ? (b as RecallMemoryBlock) : undefined
+  }
+
+  // ── Subagent 辅助 ──
+
+  function _activeSubagentBlock(): SubagentBlock | undefined {
+    const last = _lastAssistant()
+    if (!last) return undefined
+    for (let i = last.blocks.length - 1; i >= 0; i--) {
+      const b = last.blocks[i]
+      if (b.type === 'subagent' && (b as SubagentBlock).status === 'running') return b as SubagentBlock
+    }
+    return undefined
+  }
+
+  function _currentRecallBlock(): RecallMemoryBlock | undefined {
+    const sa = _activeSubagentBlock()
+    if (sa) {
+      const msg = sa.messages[sa.messages.length - 1]
+      if (msg) {
+        const b = msg.blocks[msg.blocks.length - 1]
+        if (b?.type === 'recall_memory') return b as RecallMemoryBlock
+      }
+      return undefined
+    }
+    return _lastRecallBlock()
+  }
+
+  // ── Subagent 事件镜像：将标准事件也注入到活跃的 SubagentBlock ──
+
+  function _ensureSubagentMessage(sa: SubagentBlock, evtType: string): SubagentMessage {
+    if (sa.messages.length === 0) {
+      const msg: SubagentMessage = { blocks: [] }
+      sa.messages.push(msg)
+      return msg
+    }
+    const lastMsg = sa.messages[sa.messages.length - 1]
+    // 只有 text/thinking 可能开启新一轮 message（tool 事件追加到当前 message）
+    if (evtType === 'text' || evtType === 'thinking') {
+      const lastBlock = lastMsg.blocks[lastMsg.blocks.length - 1]
+      if (lastBlock && lastBlock.type === 'tool' && lastBlock.status === 'done') {
+        const msg: SubagentMessage = { blocks: [] }
+        sa.messages.push(msg)
+        return msg
+      }
+    }
+    return lastMsg
+  }
+
+  function _mirrorTextToSubagent(delta: string) {
+    const sa = _activeSubagentBlock()
+    if (!sa) return
+    const msg = _ensureSubagentMessage(sa, 'text')
+    const lastBlock = msg.blocks[msg.blocks.length - 1]
+    if (lastBlock && lastBlock.type === 'text') {
+      lastBlock.content += delta
+    } else {
+      msg.blocks.push({ type: 'text', content: delta })
+    }
+  }
+
+  function _mirrorThinkingToSubagent(delta: string) {
+    const sa = _activeSubagentBlock()
+    if (!sa) return
+    const msg = _ensureSubagentMessage(sa, 'thinking')
+    const lastBlock = msg.blocks[msg.blocks.length - 1]
+    if (lastBlock && lastBlock.type === 'thinking') {
+      lastBlock.content += delta
+    } else {
+      // 新 thinking 前折叠同 message 中上一个 thinking
+      for (const b of msg.blocks) {
+        if (b.type === 'thinking') b.active = false
+      }
+      msg.blocks.push({ type: 'thinking', content: delta, active: true })
+    }
+  }
+
+  function _mirrorToolStartToSubagent(toolId: string, toolName: string, toolInput: Record<string, unknown>) {
+    const sa = _activeSubagentBlock()
+    if (!sa) return
+    const msg = _ensureSubagentMessage(sa, 'tool')
+    // 工具调用前折叠当前 message 中的 thinking
+    for (const b of msg.blocks) {
+      if (b.type === 'thinking') b.active = false
+    }
+    msg.blocks.push({
+      type: 'tool', id: toolId, name: toolName,
+      input: toolInput ?? {}, status: 'running',
+    })
+  }
+
+  function _mirrorToolResultToSubagent(toolId: string, content: string) {
+    const sa = _activeSubagentBlock()
+    if (!sa) return
+    const msg = sa.messages[sa.messages.length - 1]
+    if (!msg) return
+    const idx = msg.blocks.findIndex(
+      (b) => b.type === 'tool' && b.id === toolId
+    )
+    if (idx !== -1) {
+      const block = msg.blocks[idx] as Extract<MessageBlock, { type: 'tool' }>
+      msg.blocks.splice(idx, 1, {
+        ...block, status: 'done', result: content,
+      })
+    }
   }
 
   function _applyDelta(type: 'text' | 'thinking', delta: string) {
@@ -253,33 +382,55 @@ function _createChat() {
     // === 对话事件 ===
 
     if (type === 'text') {
-      if (isStreaming.value) _applyDelta('text', data.delta)
+      if (isStreaming.value) {
+        if (_activeSubagentBlock()) {
+          // subagent 上下文：只写入 sub-panel，主聊天区不渲染
+          _mirrorTextToSubagent(data.delta)
+        } else {
+          _applyDelta('text', data.delta)
+        }
+      }
     } else if (type === 'thinking') {
-      if (isStreaming.value) _applyDelta('thinking', data.delta)
+      if (isStreaming.value) {
+        if (_activeSubagentBlock()) {
+          _mirrorThinkingToSubagent(data.delta)
+        } else {
+          _applyDelta('thinking', data.delta)
+        }
+      }
     } else if (type === 'tool_start') {
       if (isStreaming.value) {
-        const last = _lastAssistant()
-        if (last) {
-          const lastBlock = last.blocks[last.blocks.length - 1]
-          if (lastBlock?.type === 'thinking') lastBlock.active = false
-          last.blocks.push({
-            type: 'tool', id: data.tool_id, name: data.tool_name,
-            input: data.tool_input ?? {}, status: 'running',
-          })
+        if (_activeSubagentBlock()) {
+          // subagent 内工具调用：只写入 sub-panel
+          _mirrorToolStartToSubagent(data.tool_id, data.tool_name, data.tool_input ?? {})
+        } else {
+          const last = _lastAssistant()
+          if (last) {
+            const lastBlock = last.blocks[last.blocks.length - 1]
+            if (lastBlock?.type === 'thinking') lastBlock.active = false
+            last.blocks.push({
+              type: 'tool', id: data.tool_id, name: data.tool_name,
+              input: data.tool_input ?? {}, status: 'running',
+            })
+          }
         }
       }
     } else if (type === 'tool_result') {
       if (isStreaming.value) {
-        const last = _lastAssistant()
-        if (last) {
-          const idx = last.blocks.findIndex(
-            (b) => b.type === 'tool' && b.id === data.tool_id
-          )
-          if (idx !== -1) {
-            const block = last.blocks[idx] as Extract<MessageBlock, { type: 'tool' }>
-            last.blocks.splice(idx, 1, {
-              ...block, status: 'done', result: data.content,
-            })
+        if (_activeSubagentBlock()) {
+          _mirrorToolResultToSubagent(data.tool_id, data.content || '')
+        } else {
+          const last = _lastAssistant()
+          if (last) {
+            const idx = last.blocks.findIndex(
+              (b) => b.type === 'tool' && b.id === data.tool_id
+            )
+            if (idx !== -1) {
+              const block = last.blocks[idx] as Extract<MessageBlock, { type: 'tool' }>
+              last.blocks.splice(idx, 1, {
+                ...block, status: 'done', result: data.content,
+              })
+            }
           }
         }
       }
@@ -293,14 +444,30 @@ function _createChat() {
           if (b.type === 'thinking') b.active = false
         }
       }
-      isStreaming.value = false
+      // 同时折叠 subagent 内部所有 thinking 块
+      const sa = _activeSubagentBlock()
+      if (sa) {
+        for (const msg of sa.messages) {
+          for (const b of msg.blocks) {
+            if (b.type === 'thinking') b.active = false
+          }
+        }
+        // subagent 内的 assistant_done：不结束主 agent 的 stream
+      } else {
+        isStreaming.value = false
+      }
     } else if (type === 'error') {
       if (isStreaming.value) {
-        const last = _lastAssistant()
-        if (last) {
-          last.blocks.push({ type: 'text', content: `\n❌ ${data.error_msg}` } as MessageBlock)
+        if (_activeSubagentBlock()) {
+          // subagent 内错误：写入 sub-panel
+          _mirrorTextToSubagent(`\n❌ ${data.error_msg}`)
+        } else {
+          const last = _lastAssistant()
+          if (last) {
+            last.blocks.push({ type: 'text', content: `\n❌ ${data.error_msg}` } as MessageBlock)
+          }
+          isStreaming.value = false
         }
-        isStreaming.value = false
       }
 
     // === 状态事件 — 作为 block 插入当前 assistant 消息 ===
@@ -353,35 +520,65 @@ function _createChat() {
 
     } else if (type === 'sub_panel_enter') {
       if (data.tool_name === 'recall_memory' && data.tool_id) {
+        const sa = _activeSubagentBlock()
+        if (sa) {
+          // subagent 内的 recall_memory → 放入 subagent 当前 message
+          let msg = sa.messages[sa.messages.length - 1]
+          if (!msg) { msg = { blocks: [] }; sa.messages.push(msg) }
+          msg.blocks.push(_emptyRecallBlock(data.tool_id, true))
+        } else {
+          // 主 agent 的 recall_memory（现有行为）
+          const last = _lastAssistant()
+          if (last) {
+            const block = _emptyRecallBlock(data.tool_id, true)
+            last.blocks.push(block)
+          }
+        }
+        // 不自动展开子面板，等用户点击"查看详情"
+      } else if (data.tool_name === 'use_subagent' && data.tool_id) {
         const last = _lastAssistant()
         if (last) {
-          const block = _emptyRecallBlock(data.tool_id, true)
+          // 从关联的 tool 块中提取 agent_type 和 name
+          let agentType = 'explore'
+          let name = ''
+          for (let i = last.blocks.length - 1; i >= 0; i--) {
+            const b = last.blocks[i]
+            if (b.type === 'tool' && b.name === 'use_subagent' && b.status === 'running') {
+              agentType = (b.input as any).agent_type || 'explore'
+              name = (b.input as any).name || ''
+              break
+            }
+          }
+          const block = _emptySubagentBlock(data.tool_id, agentType, name)
           last.blocks.push(block)
-          // 不自动展开子面板，等用户点击"查看详情"
         }
       }
 
     } else if (type === 'sub_panel_exit') {
-      const rb = _lastRecallBlock()
-      if (rb) rb.active = false
+      // recall_memory 退出：仅当找到的 recall block 仍处于 active 状态时处理
+      const rb = _currentRecallBlock()
+      if (rb && rb.active) { rb.active = false; return }
+      // subagent 退出（recall block 已在此之前被折叠，或不存在 recall block）
+      const sa = _activeSubagentBlock()
+      if (sa) { sa.active = false; sa.status = 'done' }
       // 不弹栈 — 用户通过"返回对话"按钮或点击空白区域手动退出子面板
 
     // ── Stage 1: Expand ──
 
     } else if (type === 'recall_expand_start') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) { rb.expand.status = 'running'; rb.expand.thinking = ''; rb.expand.text = '' }
 
     } else if (type === 'recall_expand_thinking') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) rb.expand.thinking += (data.delta || '')
 
     } else if (type === 'recall_expand_text') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) rb.expand.text += (data.delta || '')
 
     } else if (type === 'recall_expand_done') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         rb.expand.status = 'done'
         try {
@@ -394,7 +591,7 @@ function _createChat() {
     // ── Stage 2: Retrieve ──
 
     } else if (type === 'recall_query_start') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         rb.retrieve.status = 'running'
         // 添加占位条目，卡片在结果到达前保持展开
@@ -405,7 +602,7 @@ function _createChat() {
       }
 
     } else if (type === 'recall_query_result') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         try {
           const d = JSON.parse(data.content || '{}')
@@ -427,7 +624,7 @@ function _createChat() {
       }
 
     } else if (type === 'recall_retrieve_done') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         rb.retrieve.status = 'done'
         try {
@@ -439,19 +636,19 @@ function _createChat() {
     // ── Stage 3: Rerank ──
 
     } else if (type === 'recall_rerank_start') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) { rb.rerank.status = 'running'; rb.rerank.thinking = ''; rb.rerank.text = '' }
 
     } else if (type === 'recall_rerank_thinking') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) rb.rerank.thinking += (data.delta || '')
 
     } else if (type === 'recall_rerank_text') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) rb.rerank.text += (data.delta || '')
 
     } else if (type === 'recall_rerank_done') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         rb.rerank.status = 'done'
         try {
@@ -465,11 +662,11 @@ function _createChat() {
     // ── Stage 4: Synthesize ──
 
     } else if (type === 'recall_synth_start') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) { rb.synth.status = 'running'; rb.synth.thinking = ''; rb.synth.text = '' }
 
     } else if (type === 'recall_synth_input') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         try {
           const d = JSON.parse(data.content || '{}')
@@ -479,15 +676,15 @@ function _createChat() {
       }
 
     } else if (type === 'recall_synth_thinking') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) rb.synth.thinking += (data.delta || '')
 
     } else if (type === 'recall_synth_text') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) rb.synth.text += (data.delta || '')
 
     } else if (type === 'recall_synth_done') {
-      const rb = _lastRecallBlock()
+      const rb = _currentRecallBlock()
       if (rb) {
         rb.synth.status = 'done'
         rb.synth.result = data.content || ''
@@ -569,10 +766,80 @@ function _createChat() {
     else if (et === 'recall_synth_done') { rb.synth.status = 'done'; rb.synth.result = content }
   }
 
+  // ── 回放时子面板镜像 ──
+
+  function _replayEnsureSubagentMessage(sb: SubagentBlock | null, evtType: string): SubagentMessage | null {
+    if (!sb) return null
+    if (sb.messages.length === 0) {
+      const msg: SubagentMessage = { blocks: [] }
+      sb.messages.push(msg)
+      return msg
+    }
+    const lastMsg = sb.messages[sb.messages.length - 1]
+    if (evtType === 'text' || evtType === 'thinking') {
+      const lastBlock = lastMsg.blocks[lastMsg.blocks.length - 1]
+      if (lastBlock && lastBlock.type === 'tool' && lastBlock.status === 'done') {
+        const msg: SubagentMessage = { blocks: [] }
+        sb.messages.push(msg)
+        return msg
+      }
+    }
+    return lastMsg
+  }
+
+  function _replayMirrorTextToSubagent(sb: SubagentBlock | null, evtType: string, content: string) {
+    if (!sb) return
+    const msg = _replayEnsureSubagentMessage(sb, evtType)
+    if (!msg) return
+    if (evtType === 'thinking') {
+      // 新 thinking 前折叠同 message 中上一个 thinking
+      for (const b of msg.blocks) {
+        if (b.type === 'thinking') b.active = false
+      }
+    }
+    msg.blocks.push({
+      type: evtType as 'text' | 'thinking',
+      content,
+      active: false, // 历史记录默认折叠
+    } as MessageBlock)
+  }
+
+  function _replayMirrorToolToSubagent(sb: SubagentBlock | null, action: 'start' | 'result', data: any) {
+    if (!sb) return
+    if (action === 'start') {
+      const msg = _replayEnsureSubagentMessage(sb, 'tool')
+      if (!msg) return
+      // 工具调用前折叠同 message 中的 thinking
+      for (const b of msg.blocks) {
+        if (b.type === 'thinking') b.active = false
+      }
+      msg.blocks.push({
+        type: 'tool',
+        id: data.tool_id,
+        name: data.tool_name,
+        input: data.tool_input ?? {},
+        status: 'running',
+      })
+    } else {
+      const msg = sb.messages[sb.messages.length - 1]
+      if (!msg) return
+      const idx = msg.blocks.findIndex(
+        (b) => b.type === 'tool' && b.id === data.tool_id
+      )
+      if (idx !== -1) {
+        const block = msg.blocks[idx] as Extract<MessageBlock, { type: 'tool' }>
+        msg.blocks.splice(idx, 1, {
+          ...block, status: 'done', result: data.content || '',
+        })
+      }
+    }
+  }
+
   // ---- 从 transcript 重建历史消息 ----
   function rebuildFromTranscript(transcript: any[]): ChatMessage[] {
     const rebuilt: ChatMessage[] = []
     let curAssistant: ChatMessage | null = null
+    let _replaySubagentBlock: SubagentBlock | null = null
 
     for (const entry of transcript) {
       const et = entry.type as string
@@ -642,40 +909,58 @@ function _createChat() {
         continue
       }
 
-      // thought / text / tool_start → 需要 assistant 容器
+      // thought / text / tool_start → 需要 assistant 容器（subagent 内则只写 subpanel）
       if (et === 'thinking' || et === 'text' || et === 'tool_start') {
-        if (!curAssistant) {
-          curAssistant = { role: 'assistant', content: '', blocks: [] }
-          rebuilt.push(curAssistant)
-        }
-
-        if (et === 'thinking') {
-          curAssistant.blocks.push({
-            type: 'thinking',
-            content: entry.content || '',
-            active: false, // 历史思考默认折叠
-          })
-        } else if (et === 'text') {
-          curAssistant.blocks.push({
-            type: 'text',
-            content: entry.content || '',
-          })
-        } else if (et === 'tool_start') {
-          curAssistant.blocks.push({
-            type: 'tool',
-            id: entry.tool_id || '',
-            name: entry.tool_name || '',
-            input: entry.tool_input ?? {},
-            status: 'running',
-          })
+        if (_replaySubagentBlock) {
+          // subagent 上下文：只写入 subagent block
+          if (et === 'thinking') {
+            _replayMirrorTextToSubagent(_replaySubagentBlock, 'thinking', entry.content || '')
+          } else if (et === 'text') {
+            _replayMirrorTextToSubagent(_replaySubagentBlock, 'text', entry.content || '')
+          } else if (et === 'tool_start') {
+            _replayMirrorToolToSubagent(_replaySubagentBlock, 'start', {
+              tool_id: entry.tool_id || '',
+              tool_name: entry.tool_name || '',
+              tool_input: entry.tool_input ?? {},
+            })
+          }
+        } else {
+          if (!curAssistant) {
+            curAssistant = { role: 'assistant', content: '', blocks: [] }
+            rebuilt.push(curAssistant)
+          }
+          if (et === 'thinking') {
+            curAssistant.blocks.push({
+              type: 'thinking',
+              content: entry.content || '',
+              active: false,
+            })
+          } else if (et === 'text') {
+            curAssistant.blocks.push({
+              type: 'text',
+              content: entry.content || '',
+            })
+          } else if (et === 'tool_start') {
+            curAssistant.blocks.push({
+              type: 'tool',
+              id: entry.tool_id || '',
+              name: entry.tool_name || '',
+              input: entry.tool_input ?? {},
+              status: 'running',
+            })
+          }
         }
         continue
       }
 
-      // tool_result → 更新匹配的 tool block
+      // tool_result → 更新匹配的 tool block（subagent 内只写 subpanel）
       if (et === 'tool_result') {
-        if (curAssistant) {
-          // 逆序查找最后一个匹配的 tool block（同 tool_use_id 可能有多个 subagent 调用）
+        if (_replaySubagentBlock) {
+          _replayMirrorToolToSubagent(_replaySubagentBlock, 'result', {
+            tool_id: entry.tool_id || '',
+            content: entry.content || '',
+          })
+        } else if (curAssistant) {
           let idx = -1
           for (let i = curAssistant.blocks.length - 1; i >= 0; i--) {
             const b = curAssistant.blocks[i]
@@ -703,7 +988,17 @@ function _createChat() {
             if (b.type === 'thinking') b.active = false
           }
         }
-        curAssistant = null
+        // 同时折叠 subagent 内的 thinking
+        if (_replaySubagentBlock) {
+          for (const msg of _replaySubagentBlock.messages) {
+            for (const b of msg.blocks) {
+              if (b.type === 'thinking') b.active = false
+            }
+          }
+          // subagent 内的 assistant_done：不重置主 agent 的 curAssistant
+        } else {
+          curAssistant = null
+        }
         continue
       }
 
@@ -720,28 +1015,80 @@ function _createChat() {
         continue
       }
 
-      // sub_panel_enter → 创建 recall_memory block
+      // sub_panel_enter → 创建 recall_memory / subagent block
       if (et === 'sub_panel_enter') {
         if (entry.tool_name === 'recall_memory' && entry.tool_id) {
+          if (_replaySubagentBlock) {
+            let msg = _replaySubagentBlock.messages[_replaySubagentBlock.messages.length - 1]
+            if (!msg) { msg = { blocks: [] }; _replaySubagentBlock.messages.push(msg) }
+            msg.blocks.push(_emptyRecallBlock(entry.tool_id, false))
+          } else {
+            if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+            const block = _emptyRecallBlock(entry.tool_id, false)
+            curAssistant.blocks.push(block)
+          }
+        } else if (entry.tool_name === 'use_subagent' && entry.tool_id) {
           if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
-          const block = _emptyRecallBlock(entry.tool_id, false)
+          // 从最近的 use_subagent tool block 提取 agent_type/name
+          let agentType = 'explore'
+          let name = ''
+          for (let i = curAssistant.blocks.length - 1; i >= 0; i--) {
+            const b = curAssistant.blocks[i]
+            if (b.type === 'tool' && b.name === 'use_subagent' && b.status === 'running') {
+              agentType = (b.input as any).agent_type || 'explore'
+              name = (b.input as any).name || ''
+              break
+            }
+          }
+          const block = _emptySubagentBlock(entry.tool_id, agentType, name)
           curAssistant.blocks.push(block)
+          _replaySubagentBlock = block
         }
         continue
       }
 
-      // Recall events → 追加到当前 recall_memory block
+      // Recall events → 追加到当前 recall_memory block（优先 subagent 上下文，否则主聊天）
       if (et.startsWith('recall_')) {
-        const rb = curAssistant?.blocks[curAssistant.blocks.length - 1]
-        if (rb?.type !== 'recall_memory') continue
-        _applyRecallTranscript(rb, entry)
+        if (_replaySubagentBlock) {
+          let msg = _replaySubagentBlock.messages[_replaySubagentBlock.messages.length - 1]
+          if (!msg) { msg = { blocks: [] }; _replaySubagentBlock.messages.push(msg) }
+          let rb = msg.blocks[msg.blocks.length - 1]
+          if (rb?.type !== 'recall_memory') {
+            rb = _emptyRecallBlock('', false)
+            msg.blocks.push(rb)
+          }
+          _applyRecallTranscript(rb, entry)
+        } else {
+          const rb = curAssistant?.blocks[curAssistant.blocks.length - 1]
+          if (rb?.type !== 'recall_memory') continue
+          _applyRecallTranscript(rb, entry)
+        }
         continue
       }
 
-      // sub_panel_exit → 折叠 recall block
+      // sub_panel_exit → 折叠 recall block 或标记 subagent 完成
       if (et === 'sub_panel_exit') {
-        const rb = curAssistant?.blocks[curAssistant.blocks.length - 1]
-        if (rb?.type === 'recall_memory') rb.active = false
+        // 如果 tool_id 匹配当前 replay 的 subagent block，则这是 subagent 退出
+        if (_replaySubagentBlock && entry.tool_id === _replaySubagentBlock.toolId) {
+          _replaySubagentBlock.active = false
+          _replaySubagentBlock.status = 'done'
+          _replaySubagentBlock = null
+        } else {
+          // recall_memory 退出：优先在 subagent 内查找，否则在主聊天查找
+          let rb: RecallMemoryBlock | undefined
+          if (_replaySubagentBlock) {
+            const msg = _replaySubagentBlock.messages[_replaySubagentBlock.messages.length - 1]
+            if (msg) {
+              const b = msg.blocks[msg.blocks.length - 1]
+              if (b?.type === 'recall_memory') rb = b as RecallMemoryBlock
+            }
+          }
+          if (!rb) {
+            const b = curAssistant?.blocks[curAssistant.blocks.length - 1]
+            if (b?.type === 'recall_memory') rb = b as RecallMemoryBlock
+          }
+          if (rb) rb.active = false
+        }
         continue
       }
 
