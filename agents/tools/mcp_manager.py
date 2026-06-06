@@ -16,6 +16,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from typing import Any
 from typing import Callable
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -244,6 +245,19 @@ class MCPManager:
     def get_tool_handlers(self) -> dict[str, Callable]:
         """返回工具名到处理函数的映射字典。"""
         return self._tool_handlers
+
+    def get_server_status(self) -> list[dict[str, Any]]:
+        """返回所有 MCP 服务器的连接状态列表。"""
+        if not self._mcp_enabled:
+            return []
+        server_configs = self._load_servers_config()
+        result: list[dict[str, Any]] = []
+        for server_name in server_configs:
+            result.append({
+                "name": server_name,
+                "connected": server_name in self._connections,
+            })
+        return result
 
     def shutdown(self) -> None:
         """显式关闭所有 MCP 连接（atexit 也会自动调用）。"""

@@ -135,6 +135,8 @@ function _createChat() {
   const hasSession = ref(false) // 是否有活跃会话（已发送过消息）
   const tokenUsage = ref<{ used: number; total: number } | null>(null)
   const todoList = ref<{ content: string; status: string }[]>([])
+  const mcpServers = ref<{ name: string; connected: boolean }[]>([])
+  const skills = ref<{ name: string; description: string }[]>([])
 
   // 子面板栈：支持嵌套（subagent 内调用 recall_memory 等场景）
   // 栈顶为当前可见的子面板；未来扩展其他 tool_name 时，在 .data 上做 union
@@ -364,6 +366,22 @@ function _createChat() {
 
     if (type === 'session_list') {
       sessions.value = data.sessions || []
+      return
+    }
+
+    if (type === 'mcp_info') {
+      try {
+        const d = JSON.parse(data.content || '{}')
+        if (Array.isArray(d.servers)) mcpServers.value = d.servers
+      } catch { /* ignore */ }
+      return
+    }
+
+    if (type === 'skill_info') {
+      try {
+        const d = JSON.parse(data.content || '{}')
+        if (Array.isArray(d.skills)) skills.value = d.skills
+      } catch { /* ignore */ }
       return
     }
 
@@ -1144,5 +1162,5 @@ function _createChat() {
     return rebuilt
   }
 
-  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, tokenUsage, todoList, connect, send, switchSession, newSession, rewindToTurn }
+  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, tokenUsage, todoList, mcpServers, skills, connect, send, switchSession, newSession, rewindToTurn }
 }

@@ -54,6 +54,19 @@ class WsHandler:
             "sessions": session_manager.list_sessions(),
         })
 
+        # 推送 MCP 服务器状态
+        mcp_servers = self._agent_app.mcp_manager.get_server_status()
+        await websocket.send_json({
+            "type": "mcp_info",
+            "content": json.dumps({"servers": mcp_servers}, ensure_ascii=False),
+        })
+        # 推送 Skill 列表
+        skills = self._agent_app.skill_manager.get_skill_list()
+        await websocket.send_json({
+            "type": "skill_info",
+            "content": json.dumps({"skills": skills}, ensure_ascii=False),
+        })
+
         try:
             async for raw_message in websocket.iter_text():
                 try:

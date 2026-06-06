@@ -3,10 +3,13 @@ defineProps<{
   title: string
   width: number
   side: 'left' | 'right'
+  tabs?: { key: string; label: string }[]
+  activeTab?: string
 }>()
 
 const emit = defineEmits<{
   close: []
+  'tab-change': [key: string]
 }>()
 </script>
 
@@ -14,6 +17,15 @@ const emit = defineEmits<{
   <div class="side-panel" :style="{ width: width + 'px' }">
     <header class="panel-header">
       <span class="panel-title">{{ title }}</span>
+      <div v-if="tabs && tabs.length" class="panel-tabs">
+        <button
+          v-for="t in tabs"
+          :key="t.key"
+          class="panel-tab"
+          :class="{ active: activeTab === t.key }"
+          @click="emit('tab-change', t.key)"
+        >{{ t.label }}</button>
+      </div>
       <button class="panel-close" @click="emit('close')" title="关闭面板">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <line x1="3" y1="3" x2="11" y2="11" />
@@ -52,6 +64,25 @@ const emit = defineEmits<{
   font-weight: 600; font-size: 13px;
   color: var(--fg);
   letter-spacing: -0.2px;
+}
+.panel-tabs {
+  display: flex; gap: 4px;
+  flex: 1; justify-content: center;
+}
+.panel-tab {
+  padding: 4px 10px;
+  font-family: 'Space Grotesk', sans-serif; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  background: none; border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer; transition: 0.15s ease;
+}
+.panel-tab:hover { color: var(--amber); border-color: var(--amber); }
+.panel-tab.active {
+  color: var(--amber);
+  background: var(--amber-subtle);
+  border-color: rgba(217, 119, 6, 0.2);
 }
 .panel-close {
   display: flex; align-items: center; justify-content: center;

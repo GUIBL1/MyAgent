@@ -45,6 +45,18 @@ class SkillManager:
 
     # ======================== public ========================
 
+    def get_skill_list(self) -> list[dict[str, str]]:
+        """返回所有已加载 skill 的名称与描述列表。"""
+        result: list[dict[str, str]] = []
+        for skill_name, skill in self._skills.items():
+            meta = skill.get("meta", {})
+            if isinstance(meta, dict):
+                description = meta.get("description", "")
+            else:
+                description = ""
+            result.append({"name": skill_name, "description": description})
+        return result
+
     def skill_descriptions(self) -> str:
         """返回系统提示词可用的技能简介列表。"""
         if not self._skills:
@@ -71,11 +83,21 @@ class SkillManager:
         if not match:
             raise ValueError("SKILL.md must start with YAML-like metadata block enclosed by ---.")
 
+        meta_text = match.group(1)
         metadata: dict[str, str] = {}
-        for line in match.group(1).strip().splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                metadata[key.strip()] = value.strip()
+
+        # name
+        name_match = re.search(r"^name:\s*(.*?)\s*^description:", meta_text, re.MULTILINE | re.DOTALL)
+        if name_match:
+            metadata["name"] = name_match.group(1).strip()
+
+        # description
+        desc_match = re.search(r"^description:\s*(.*)", meta_text, re.MULTILINE | re.DOTALL)
+        if desc_match:
+            desc = desc_match.group(1).strip()
+            if desc.startswith("|"):
+                desc = desc[1:].strip()
+            metadata["description"] = desc
 
         body = match.group(2).strip()
         return metadata, body
