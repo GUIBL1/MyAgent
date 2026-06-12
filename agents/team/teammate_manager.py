@@ -43,6 +43,7 @@ inbox/<name>.jsonl — 每行一条 JSON：
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import stat
@@ -115,6 +116,9 @@ class TeammateManager:
         # ws_handler 引用（由 ws_handler.handle() 回填），供推送 team_update 和 teammate 事件
         self._ws_handler: Any = None
 
+        # 应用终止时自动将所有队友（除 lead 外）设为 shutdown
+        atexit.register(self._shutdown_all_teammates)
+
     # ======================== public ========================
     def spawn_teammate(self, name: str, role: str, prompt: str) -> str:
         """启动一个新的 teammate，或重启 shutdown 的 teammate。"""
@@ -155,6 +159,14 @@ class TeammateManager:
         return "Enter idle phase."
 
     # ======================== private ========================
+
+    def _shutdown_all_teammates(self) -> None:
+        """atexit 回调：将除 lead 外的所有队员设为 shutdown 并保存。"""
+        with self._team_config_lock:
+            for member in self._team_config.get("members", []):
+                if member["name"] != "lead" and member["status"] != "shutdown":
+                    member["status"] = "shutdown"
+            self._save_config()
 
     def _get_team_summary(self) -> dict:
         """返回团队摘要。"""

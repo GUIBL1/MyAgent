@@ -14,7 +14,7 @@ const emit = defineEmits<{
   (e: 'toggle-right'): void
 }>()
 
-const { messages, isStreaming, wsStatus, hasSession, subPanelStack, connect, send } = useChat()
+const { messages, isStreaming, wsStatus, hasSession, subPanelStack, connect, send, stop } = useChat()
 const activeSubPanel = computed(() => {
   const top = subPanelStack.value[subPanelStack.value.length - 1]
   return top || null
@@ -106,6 +106,10 @@ function autoResize() {
   el.style.height = Math.min(el.scrollHeight, 160) + 'px'
   // 输入框增高时，消息区跟着上滚，保持最后一条可见
   scrollToBottom()
+}
+
+function handleStop() {
+  stop()
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -612,7 +616,8 @@ function mdHtml(text: string): string {
           @input="autoResize"
           @keydown="handleKeydown"
         ></textarea>
-        <button :disabled="isStreaming" class="btn-send" @click="handleSend">发送</button>
+        <button v-if="isStreaming" class="btn-stop" @click="handleStop">停止</button>
+        <button v-else class="btn-send" @click="handleSend">发送</button>
       </div>
     </div>
   </div>
@@ -959,6 +964,19 @@ textarea::placeholder { color: var(--fg-muted); }
 .btn-send:hover  { background: var(--amber-hover); }
 .btn-send:active { transform: scale(0.97); }
 .btn-send:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+.btn-stop {
+  background: var(--red); color: #FFFFFF;
+  border: none; border-radius: var(--radius-lg);
+  padding: 11px 24px; cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px; font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap; min-height: 44px;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.btn-stop:hover  { background: #DC2626; }
+.btn-stop:active { transform: scale(0.97); }
 
 /* ======================== Status Events ======================== */
 

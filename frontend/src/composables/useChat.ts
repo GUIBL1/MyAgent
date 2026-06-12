@@ -808,6 +808,9 @@ function _createChat() {
           if (b.type === 'thinking') b.active = false
           if (b.type === 'inbox_message' || b.type === 'task_claimed') (b as any).active = false
         }
+        if (data.stop_reason === 'cancelled') {
+          last.blocks.push({ type: 'text', content: '\n*（已停止）*' } as MessageBlock)
+        }
       }
       // 同时折叠 subagent 内部所有 thinking 块
       const sa = _activeSubagentBlock()
@@ -1084,10 +1087,14 @@ function _createChat() {
   function send(content: string) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     messages.value.push({ role: 'user', content, blocks: [] })
-    // 立即创建 assistant 消息并标记流式中，确保后端 deltas 到达时已有容器
     messages.value.push({ role: 'assistant', content: '', blocks: [] })
     isStreaming.value = true
     ws.send(JSON.stringify({ type: 'send', content }))
+  }
+
+  function stop() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'stop' }))
   }
 
   // ---- 会话操作 ----
@@ -1520,5 +1527,5 @@ function _createChat() {
     return rebuilt
   }
 
-  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, rightSubPanelStack, tokenUsage, todoList, mcpServers, skills, teamInfo, teammateViews, activeTeammate, loadingTeammate, connect, send, switchSession, newSession, rewindToTurn, loadTeammateSession, openRightRecallDetail, openRightSubagentDetail, closeRightSubPanelTop }
+  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, rightSubPanelStack, tokenUsage, todoList, mcpServers, skills, teamInfo, teammateViews, activeTeammate, loadingTeammate, connect, send, stop, switchSession, newSession, rewindToTurn, loadTeammateSession, openRightRecallDetail, openRightSubagentDetail, closeRightSubPanelTop }
 }

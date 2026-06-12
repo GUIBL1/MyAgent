@@ -36,6 +36,7 @@ class WsSession:
     def __init__(self, session_manager: Any):
         self.messages: list[dict[str, Any]] = []
         self.session_manager = session_manager
+        self.stop_event = threading.Event()
 
 
 class WsHandler:
@@ -120,7 +121,10 @@ class WsHandler:
                 msg_type = msg.get("type")
 
                 if msg_type == "send":
+                    session.stop_event.clear()
                     self._handle_send(session, msg.get("content", ""))
+                elif msg_type == "stop":
+                    session.stop_event.set()
                 elif msg_type == "rewind":
                     await self._handle_rewind(websocket, session, msg.get("turn", 1))
                 elif msg_type == "switch_session":

@@ -60,6 +60,7 @@ class MainLoop:
         """执行主代理循环，直到模型停止发起工具调用。"""
         messages = session.messages
         session_manager = session.session_manager
+        stop_event = getattr(session, 'stop_event', None)
 
         todo_agent_name = ""
         background_task_agent_name = "lead"
@@ -71,6 +72,10 @@ class MainLoop:
             session_manager.save_context_full(messages)
 
         while True:
+            if stop_event and stop_event.is_set():
+                yield StreamEvent(type=EventType.ASSISTANT_DONE, stop_reason="cancelled")
+                return
+
             # 每轮微压缩（受开关控制），超阈值触发全量压缩。
             if self._micro_compact_enabled:
                 yield from self._context_compression_manager.micro_compact(messages)
