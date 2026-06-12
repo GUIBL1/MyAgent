@@ -247,10 +247,6 @@ class MainLoop:
                     type=EventType.TODO_REMINDER,
                     content="Update your todos.",
                 )
-                yield StreamEvent(
-                    type=EventType.CONTEXT_ENTRY,
-                    content=json.dumps({"role": "user", "content": "<reminder>Update your todos.</reminder>"}, ensure_ascii=False, default=str),
-                )
                 results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
 
             messages.append({"role": "user", "content": results})

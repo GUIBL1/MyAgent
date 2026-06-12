@@ -96,6 +96,7 @@ const emit = defineEmits<{
 
 .panel-body {
   flex: 1; overflow-y: auto;
+  min-height: 0;
   padding: 8px 16px;
 }
 

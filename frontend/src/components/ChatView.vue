@@ -53,7 +53,7 @@ let recallAutoScroll = true
 function onRecallScroll() {
   if (!recallBodyEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = recallBodyEl.value
-  recallAutoScroll = scrollHeight - scrollTop - clientHeight < 60
+  recallAutoScroll = scrollHeight - scrollTop - clientHeight < 100
 }
 watch(() => recallPanelData.value, () => {
   if (!recallAutoScroll) return
@@ -69,7 +69,7 @@ let subagentAutoScroll = true
 function onSubagentScroll() {
   if (!subagentBodyEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = subagentBodyEl.value
-  subagentAutoScroll = scrollHeight - scrollTop - clientHeight < 60
+  subagentAutoScroll = scrollHeight - scrollTop - clientHeight < 100
 }
 watch(() => subagentPanelData.value, () => {
   if (!subagentAutoScroll) return
@@ -84,7 +84,7 @@ watch(() => subagentPanelData.value, () => {
 function onScroll() {
   if (!chatEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = chatEl.value
-  autoScroll = scrollHeight - scrollTop - clientHeight < 60
+  autoScroll = scrollHeight - scrollTop - clientHeight < 100
 }
 
 // ---- 发送 ----
@@ -316,10 +316,21 @@ function mdHtml(text: string): string {
 
             <!-- Inbox Message 块 -->
             <div v-else-if="block.type === 'inbox_message'" class="status-card inbox-card">
-              <details open>
+              <details :open="block.active !== false">
                 <summary>
                   <span class="status-dot"></span>
                   <span>收件箱 INBOX</span>
+                </summary>
+                <div class="status-card-body">{{ block.content }}</div>
+              </details>
+            </div>
+
+            <!-- Task Claimed 块 -->
+            <div v-else-if="block.type === 'task_claimed'" class="status-card task-card">
+              <details :open="block.active !== false">
+                <summary>
+                  <span class="status-dot"></span>
+                  <span>收到任务 TASK</span>
                 </summary>
                 <div class="status-card-body">{{ block.content }}</div>
               </details>
@@ -979,7 +990,7 @@ textarea::placeholder { color: var(--fg-muted); }
   border-left: 5px solid currentColor;
   transition: transform 0.15s ease;
 }
-.status-card details[open] > summary::before { transform: rotate(180deg); }
+.status-card details[open] > summary::before { transform: rotate(90deg); }
 
 .status-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
@@ -1016,6 +1027,13 @@ textarea::placeholder { color: var(--fg-muted); }
   border-left: 3px solid var(--c-inbox);
 }
 .inbox-card summary { color: var(--c-inbox); }
+
+/* Task Claimed — emerald */
+.task-card {
+  background: var(--green-subtle);
+  border-left: 3px solid var(--green);
+}
+.task-card summary { color: var(--green); }
 
 /* Background notification — blue */
 .bg-card {

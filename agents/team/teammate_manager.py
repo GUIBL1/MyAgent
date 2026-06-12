@@ -45,13 +45,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+from agents.core.session_manager import SessionManager
+from agents.core.stream_events import EventType, StreamEvent
 
 
 class TeammateManager:
@@ -104,10 +107,13 @@ class TeammateManager:
         self._max_output_tokens = max_output_tokens
         self._teammate_sessions_dir = teammate_sessions_dir
 
-        #读写锁，保护 team_config 的并发访问（内存数据与文件数据）
+        # 读写锁，保护 team_config 的并发访问（内存数据与文件数据）
         self._team_config_lock = threading.RLock()
         self._team_config_path = self._team_dir / "team_config.json"
         self._team_config = self._load_config()
+
+        # ws_handler 引用（由 ws_handler.handle() 回填），供推送 team_update 和 teammate 事件
+        self._ws_handler: Any = None
 
     # ======================== public ========================
     def spawn_teammate(self, name: str, role: str, prompt: str) -> str:
@@ -125,12 +131,11 @@ class TeammateManager:
                 self._team_config["members"].append(member)
             self._save_config()
 
-        thread = threading.Thread(
+        threading.Thread(
             target=self._teammate_loop,
             args=(name, role, prompt),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
         return f"Successfully spawned a teammate with name: {name}, role: {role}."
 
@@ -141,11 +146,36 @@ class TeammateManager:
             return json.dumps(self._team_config, indent=2, ensure_ascii=False)
 
 
+    def get_team_summary(self) -> dict:
+        """返回团队摘要"""
+        return self._get_team_summary()
+
     def idle(self) -> str:
         """占位 idle 方法，保持接口完整性。"""
         return "Enter idle phase."
 
     # ======================== private ========================
+
+    def _get_team_summary(self) -> dict:
+        """返回团队摘要。"""
+        with self._team_config_lock:
+            return {
+                "team_name": self._team_config.get("team_name", ""),
+                "members": [
+                    {"name": m["name"], "role": m["role"], "status": m["status"]}
+                    for m in self._team_config.get("members", [])
+                ],
+            }
+
+    def _push_team_update(self) -> None:
+        """团队配置变化时推送 team_update 到 ws_handler 的 main 管路。"""
+        if self._ws_handler is None:
+            return
+        self._ws_handler.push("main", {
+            "type": "team_update",
+            "content": json.dumps(self._get_team_summary(), ensure_ascii=False),
+        })
+
     def _load_config(self) -> dict:
         """加载团队配置；若不存在则返回默认结构，并确保 lead 始终在成员列表中。"""
         if self._team_config_path.exists():
@@ -161,10 +191,11 @@ class TeammateManager:
         return config
 
     def _save_config(self):
-        """原子保存团队配置到磁盘。"""
+        """原子保存团队配置到磁盘，并推送团队状态更新。"""
         with self._team_config_lock:
             content = json.dumps(self._team_config, indent=2, ensure_ascii=False)
             self._atomic_write_text(self._team_config_path, content)
+        self._push_team_update()
 
     @staticmethod
     def _atomic_write_text(file_path: Path, content: str) -> None:
@@ -217,8 +248,35 @@ class TeammateManager:
                 member["status"] = status
                 self._save_config()
 
-    def _teammate_loop(self, name: str, role: str, prompt: str):
-        """teammate 的主循环（工作阶段 + 空闲阶段）。"""
+    def _teammate_loop(self, name: str, role: str, prompt: str) -> None:
+        """teammate 线程入口：创建 session，消费 generator，推送事件到 ws_handler。"""
+        sessions_dir = self._teammate_sessions_dir / name if self._teammate_sessions_dir else None
+        session_mgr = SessionManager(sessions_dir=sessions_dir) if sessions_dir else None
+        if session_mgr:
+            session_mgr.new_session()
+
+        # 将 teammate 的 SessionManager 注册到 ws_handler，统一写 transcript
+        if self._ws_handler and session_mgr:
+            self._ws_handler.register_source(name, session_mgr)
+
+        try:
+            for stream_event in self._run_teammate(name, role, prompt, session_mgr):
+                if self._ws_handler:
+                    self._ws_handler.push(name, stream_event.to_dict())
+        except Exception as exc:
+            self._set_status(name, "shutdown")
+            if self._ws_handler:
+                self._ws_handler.push("main", {
+                    "type": "teammate_error",
+                    "content": json.dumps({"name": name, "error": str(exc)}, ensure_ascii=False),
+                })
+            print(f"[teammate] '{name}' crashed: {exc}")
+
+    def _run_teammate(self, name: str, role: str, prompt: str, session_mgr: SessionManager | None) -> Iterator[StreamEvent]:
+        """teammate 主循环 generator（工作阶段 + 空闲阶段）。
+
+        yield StreamEvent 供 ws_handler 统一处理 delta 合并、transcript、前端推送。
+        """
         with self._team_config_lock:
             team_name = self._team_config.get("team_name", "default")
         system_prompt = self._build_system_prompt(
@@ -226,9 +284,10 @@ class TeammateManager:
         )
 
         messages: list[dict] = [{"role": "user", "content": prompt}]
-        session_path = self._build_session_path(name) if self._teammate_sessions_dir else None
-        if session_path:
-            self._write_jsonl(session_path, messages[0], mode="w")
+
+        # 覆写 context.jsonl
+        if session_mgr and session_mgr.session_id:
+            session_mgr.save_context_full(messages)
 
         todo_agent_name = ""
         rounds_without_todo = 0
@@ -242,40 +301,56 @@ class TeammateManager:
                 # 每轮微压缩（受开关控制），超阈值触发全量压缩。
                 if self._context_compression_manager:
                     if self._micro_compact_enabled:
-                        self._context_compression_manager.micro_compact(messages)
-                        if session_path:
-                            self._write_jsonl(session_path, messages, mode="w")
+                        yield from self._context_compression_manager.micro_compact(messages)
+                        if session_mgr and session_mgr.session_id:
+                            session_mgr.save_context_full(messages)
                     if total_tokens >= self._token_threshold * self._compact_threshold_pct:
-                        print(f"[teammate:{name} auto-compact]")
-                        messages[:] = self._context_compression_manager.auto_compact(messages)
-                        total_tokens = 0
-                        if session_path:
-                            self._write_jsonl(session_path, messages, mode="w")
+                        for compact_event in self._context_compression_manager.auto_compact(messages):
+                            yield compact_event
+                            if compact_event.event_type == EventType.CONTEXT_ENTRY:
+                                messages[:] = [json.loads(compact_event.content)]
+                                total_tokens = 0
+                                if session_mgr and session_mgr.session_id:
+                                    session_mgr.save_context_full(messages)
 
-                # 注入后台任务通知。
+                # 注入后台任务通知
                 if self._background_manager and background_task_agent_name:
                     notifications = self._background_manager.drain_and_get_notifications(agent_name=background_task_agent_name)
                     if notifications:
                         background_task_result = "\n\n".join(
-                            f"Background task notification received (task id = {notification['background_task_id']})\ncommand: {notification['command']}\nstatus: {notification['status']}\nresult: {notification['result']}."
-                            for notification in notifications
+                            f"Background task notification received (task id = {n['background_task_id']})\ncommand: {n['command']}\nstatus: {n['status']}\nresult: {n['result']}."
+                            for n in notifications
                         )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": f"<background-task-results>\n{background_task_result}\n</background-task-results>",
-                            }
+                        bg_msg = f"<background-task-results>\n{background_task_result}\n</background-task-results>"
+                        yield StreamEvent(
+                            type=EventType.BACKGROUND_NOTIFICATION,
+                            content=background_task_result,
                         )
-                        if session_path:
-                            self._write_jsonl(session_path, messages[-1], mode="a")
+                        yield StreamEvent(
+                            type=EventType.CONTEXT_ENTRY,
+                            content=json.dumps({"role": "user", "content": bg_msg}, ensure_ascii=False, default=str),
+                        )
+                        messages.append({"role": "user", "content": bg_msg})
+                        if session_mgr and session_mgr.session_id:
+                            session_mgr.write_context(messages[-1])
 
-                # 注入收件箱消息。
+                # 注入收件箱消息
                 inbox = self._message_bus.read_inbox(name)
                 if inbox:
-                    messages.append({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"})
-                    if session_path:
-                        self._write_jsonl(session_path, messages[-1], mode="a")
+                    yield StreamEvent(
+                        type=EventType.INBOX_MESSAGE,
+                        content=inbox,
+                    )
+                    inbox_user_msg = f"<inbox>\n{inbox}\n</inbox>\nPlease respond to this message."
+                    yield StreamEvent(
+                        type=EventType.CONTEXT_ENTRY,
+                        content=json.dumps({"role": "user", "content": inbox_user_msg}, ensure_ascii=False, default=str),
+                    )
+                    messages.append({"role": "user", "content": inbox_user_msg})
+                    if session_mgr and session_mgr.session_id:
+                        session_mgr.write_context(messages[-1])
 
+                # LLM 流式调用
                 try:
                     with self._client.messages.stream(
                         model=self._model,
@@ -284,17 +359,35 @@ class TeammateManager:
                         tools=self._tools,
                         max_tokens=self._max_output_tokens,
                     ) as stream:
+                        for api_event in stream:
+                            if api_event.type == "content_block_delta":
+                                if api_event.delta.type == "thinking_delta":
+                                    yield StreamEvent(type=EventType.THINKING, delta=api_event.delta.thinking)
+                                elif api_event.delta.type == "text_delta":
+                                    yield StreamEvent(type=EventType.TEXT, delta=api_event.delta.text)
                         response = stream.get_final_message()
                 except Exception:
                     self._set_status(name, "shutdown")
+                    yield StreamEvent(type=EventType.ASSISTANT_DONE)
+                    yield StreamEvent(
+                        type=EventType.TEAM_UPDATE,
+                        content=json.dumps(self._get_team_summary(), ensure_ascii=False),
+                    )
                     return
 
                 total_tokens = response.usage.input_tokens + response.usage.output_tokens
-                messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in response.content]})
-                if session_path:
-                    self._write_jsonl(session_path, messages[-1], mode="a")
+
+                assistant_content = [b.model_dump(exclude_none=True) for b in response.content]
+                messages.append({"role": "assistant", "content": assistant_content})
+                if session_mgr and session_mgr.session_id:
+                    session_mgr.write_context(messages[-1])
+                yield StreamEvent(
+                    type=EventType.CONTEXT_ENTRY,
+                    content=json.dumps({"role": "assistant", "content": assistant_content}, ensure_ascii=False, default=str),
+                )
 
                 if response.stop_reason != "tool_use":
+                    yield StreamEvent(type=EventType.ASSISTANT_DONE)
                     break
 
                 results: list[dict] = []
@@ -305,19 +398,64 @@ class TeammateManager:
                     if block.type != "tool_use":
                         continue
 
+                    yield StreamEvent(
+                        type=EventType.TOOL_START,
+                        tool_id=block.id,
+                        tool_name=block.name,
+                        tool_input=dict(block.input) if block.input else {},
+                    )
+
                     handler = self._tool_handlers.get(block.name)
                     try:
-                        output = handler(**block.input) if handler else f"Unknown tool: {block.name}."
+                        handler_output = (
+                            handler(**block.input)
+                            if handler
+                            else f"Unknown tool: {block.name}."
+                        )
                     except Exception as exc:
-                        output = f"Tool execution error: {exc}"
+                        handler_output = f"Tool execution error: {exc}"
 
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": str(output),
-                        }
+                    if isinstance(handler_output, str):
+                        tool_result_content = handler_output
+                    elif hasattr(handler_output, '__iter__'):
+                        # Generator handler：逐事件流式推送
+                        sub_panel_opened = False
+                        final_result = ""
+                        try:
+                            for item in handler_output:
+                                if isinstance(item, StreamEvent):
+                                    if not sub_panel_opened:
+                                        yield StreamEvent(
+                                            type=EventType.SUB_PANEL_ENTER,
+                                            tool_id=block.id,
+                                            tool_name=block.name,
+                                        )
+                                        sub_panel_opened = True
+                                    yield item
+                                else:
+                                    final_result = item
+                            tool_result_content = str(final_result) if final_result else ""
+                        except Exception as exc:
+                            tool_result_content = f"Tool execution error: {exc}"
+                        if sub_panel_opened:
+                            yield StreamEvent(
+                                type=EventType.SUB_PANEL_EXIT,
+                                tool_id=block.id,
+                            )
+                    else:
+                        tool_result_content = str(handler_output)
+
+                    yield StreamEvent(
+                        type=EventType.TOOL_RESULT,
+                        tool_id=block.id,
+                        content=tool_result_content,
                     )
+
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": tool_result_content,
+                    })
 
                     if block.name == "idle":
                         idle_requested = True
@@ -337,24 +475,37 @@ class TeammateManager:
                 rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
                 if todo_agent_name and rounds_without_todo >= 3:
                     if self._todo_manager and self._todo_manager.has_undo_items(todo_agent_name):
-                        results.append(
-                            {"type": "text", "text": "<reminder>Update your todos.</reminder>"}
+                        yield StreamEvent(
+                            type=EventType.TODO_REMINDER,
+                            content="Update your todos.",
                         )
+                        results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
 
                 messages.append({"role": "user", "content": results})
-                if session_path:
-                    self._write_jsonl(session_path, messages[-1], mode="a")
+                if session_mgr and session_mgr.session_id:
+                    session_mgr.write_context(messages[-1])
+                yield StreamEvent(
+                    type=EventType.CONTEXT_ENTRY,
+                    content=json.dumps({"role": "user", "content": results}, ensure_ascii=False, default=str),
+                )
 
                 if idle_requested or shutdown_approve:
                     break
 
-
             if shutdown_approve:
                 self._set_status(name, "shutdown")
+                yield StreamEvent(
+                    type=EventType.TEAM_UPDATE,
+                    content=json.dumps(self._get_team_summary(), ensure_ascii=False),
+                )
                 return
 
             # 空闲阶段：轮询新消息与认领空闲任务。
             self._set_status(name, "idle")
+            yield StreamEvent(
+                type=EventType.TEAM_UPDATE,
+                content=json.dumps(self._get_team_summary(), ensure_ascii=False),
+            )
             resume = False
 
             poll_count = self._idle_timeout // max(self._poll_interval, 1)
@@ -364,56 +515,49 @@ class TeammateManager:
                 # 检查是否有新消息，如果有则恢复工作循环优先处理。
                 inbox = self._message_bus.read_inbox(name)
                 if inbox:
+                    yield StreamEvent(
+                        type=EventType.INBOX_MESSAGE,
+                        content=inbox,
+                    )
                     messages.append({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"})
-                    if session_path:
-                        self._write_jsonl(session_path, messages[-1], mode="a")
+                    if session_mgr and session_mgr.session_id:
+                        session_mgr.write_context(messages[-1])
+                    yield StreamEvent(
+                        type=EventType.CONTEXT_ENTRY,
+                        content=json.dumps({"role": "user", "content": f"<inbox>\n{inbox}\n</inbox>"}, ensure_ascii=False, default=str),
+                    )
                     resume = True
                     break
 
                 # 原子扫描并认领第一个空闲任务。
                 claim_result = self._task_manager.scan_and_claim(name)
-                if  claim_result:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"<auto-claimed-task>\n{claim_result}\n</auto-claimed-task>",
-                        }
+                if claim_result:
+                    yield StreamEvent(
+                        type=EventType.TASK_CLAIMED,
+                        content=claim_result,
                     )
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": "Task claimed. Working on it.",
-                        }
+                    task_prompt = f"<auto-claimed-task>\n{claim_result}\n</auto-claimed-task>\nPlease work on it."
+                    messages.append({"role": "user", "content": task_prompt})
+                    if session_mgr and session_mgr.session_id:
+                        session_mgr.write_context(messages[-1])
+                    yield StreamEvent(
+                        type=EventType.CONTEXT_ENTRY,
+                        content=json.dumps({"role": "user", "content": task_prompt}, ensure_ascii=False, default=str),
                     )
-                    if session_path:
-                        self._write_jsonl(session_path, messages[-2:], mode="a")
                     resume = True
                     break
 
 
             if not resume:
                 self._set_status(name, "shutdown")
+                yield StreamEvent(
+                    type=EventType.TEAM_UPDATE,
+                    content=json.dumps(self._get_team_summary(), ensure_ascii=False),
+                )
                 return
 
             self._set_status(name, "working")
-
-    def _build_session_path(self, name: str) -> Path:
-        """根据 name 与时间戳构造会话文件路径。"""
-        safe = re.sub(r'[^\w]', '_', name.strip(), flags=re.UNICODE).strip('_') if name.strip() else "teammate"
-        filename = f"{safe}_{int(time.time() * 1_000_000)}.jsonl"
-        filepath = self._teammate_sessions_dir / filename
-        try:
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        return filepath
-
-    def _write_jsonl(self, filepath: Path, entry: Any, mode: str = "a") -> None:
-        """写入 JSONL 文件。entry 为单条消息或消息列表。mode="a" 追加，mode="w" 覆写。异常时仅打印警告。"""
-        entries = entry if isinstance(entry, list) else [entry]
-        try:
-            with open(filepath, mode, encoding="utf-8") as f:
-                for item in entries:
-                    f.write(json.dumps(item, default=str, ensure_ascii=False) + "\n")
-        except (OSError, TypeError) as exc:
-            print(f"[teammate] session write failed: {exc}")
+            yield StreamEvent(
+                type=EventType.TEAM_UPDATE,
+                content=json.dumps(self._get_team_summary(), ensure_ascii=False),
+            )

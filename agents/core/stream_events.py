@@ -41,8 +41,10 @@ class EventType(Enum):
     AUTO_COMPACT_DONE = "auto_compact_done"
     BACKGROUND_NOTIFICATION = "background_notification"
     INBOX_MESSAGE = "inbox_message"
+    TASK_CLAIMED = "task_claimed"
     TODO_REMINDER = "todo_reminder"
     TODO_UPDATE = "todo_update"
+    TEAM_UPDATE = "team_update"
     TOKEN_USAGE = "token_usage"
 
     # === Memory Recall 管道事件 ===
@@ -91,9 +93,11 @@ class StreamEvent:
     │ AUTO_COMPACT_DONE    │ content                              │
     │ BACKGROUND_NOTIFICATION│ content                            │
     │ INBOX_MESSAGE        │ content                              │
+    │ TASK_CLAIMED         │ content (任务摘要)                     │
     │ TODO_REMINDER        │ content                              │
     │ TODO_UPDATE          │ content (JSON: agent_name + items)   │
     │ TOKEN_USAGE          │ content (JSON: used + total)         │
+    │ TEAM_UPDATE          │ content (JSON: team_name + members)  │
     │ RECALL_EXPAND_START  │ content                              │
     │ RECALL_EXPAND_THINKING│ delta                                │
     │ RECALL_EXPAND_TEXT   │ delta                                │

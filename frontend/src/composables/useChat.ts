@@ -103,7 +103,8 @@ export type MessageBlock =
   | { type: 'micro_compact'; content: string }
   | { type: 'auto_compact'; content: string; thinking: string; summary: string; compactStatus: 'running' | 'done'; result?: string }
   | { type: 'background_notification'; content: string }
-  | { type: 'inbox_message'; content: string }
+  | { type: 'inbox_message'; content: string; active?: boolean }
+  | { type: 'task_claimed'; content: string; active?: boolean }
   | { type: 'todo_reminder'; content: string }
 
 export interface SessionInfo {
@@ -137,6 +138,7 @@ function _createChat() {
   const todoList = ref<{ content: string; status: string }[]>([])
   const mcpServers = ref<{ name: string; connected: boolean }[]>([])
   const skills = ref<{ name: string; description: string }[]>([])
+  const teamInfo = ref<{ team_name: string; members: { name: string; role: string; status: string }[] } | null>(null)
 
   // 子面板栈：支持嵌套（subagent 内调用 recall_memory 等场景）
   // 栈顶为当前可见的子面板；未来扩展其他 tool_name 时，在 .data 上做 union
@@ -146,6 +148,17 @@ function _createChat() {
     data: RecallMemoryBlock | SubagentBlock
   }
   const subPanelStack: Ref<SubPanelEntry[]> = ref([])
+
+  // Teammate 输出状态
+  interface TeammateView {
+    sessionId: string
+    source: string
+    messages: ChatMessage[]
+    isActive: boolean
+  }
+  const teammateViews = ref<Record<string, TeammateView>>({})
+  const activeTeammate = ref<string | null>(null)         // 当前在右侧面板查看的 teammate name
+  const loadingTeammate = ref<string | null>(null)        // 正在加载历史的 teammate name
 
   let ws: WebSocket | null = null
 
@@ -267,6 +280,296 @@ function _createChat() {
     }
   }
 
+  // ── Teammate 事件处理 ──
+
+  function _ensureTeammate(name: string): TeammateView | null {
+    let v = teammateViews.value[name]
+    if (!v) {
+      v = { source: name, sessionId: '', messages: [], isActive: true }
+      teammateViews.value[name] = v
+    }
+    v.isActive = true
+    return v
+  }
+
+  function _teammateLastAssistant(view: TeammateView): ChatMessage | undefined {
+    for (let i = view.messages.length - 1; i >= 0; i--) {
+      if (view.messages[i].role === 'assistant') return view.messages[i]
+    }
+    return undefined
+  }
+
+  // 获取或创建 teammate view 的最后一个 assistant 消息
+  function _tmEnsureAsst(view: TeammateView): ChatMessage {
+    let last = _teammateLastAssistant(view)
+    if (!last) {
+      last = { role: 'assistant', content: '', blocks: [] }
+      view.messages.push(last)
+    }
+    return last
+  }
+
+  // 在 teammate view 中查找当前活跃的 recall_memory block
+  // 找到 teammate view 中活跃的 subagent block（运行中且未折叠）
+  function _tmActiveSubagentBlock(view: TeammateView): SubagentBlock | undefined {
+    const last = _teammateLastAssistant(view)
+    if (!last) return undefined
+    for (let i = last.blocks.length - 1; i >= 0; i--) {
+      const b = last.blocks[i]
+      if (b.type === 'subagent' && (b as SubagentBlock).status === 'running') return b as SubagentBlock
+    }
+    return undefined
+  }
+
+  // 找到 teammate view 中"当前"活跃的 recall_memory block
+  // 优先搜索 active subagent 内部，其次搜索 assistant 顶层
+  function _tmCurrentRecallBlock(view: TeammateView): RecallMemoryBlock | undefined {
+    const sa = _tmActiveSubagentBlock(view)
+    if (sa) {
+      const msg = sa.messages[sa.messages.length - 1]
+      if (msg) {
+        const b = msg.blocks[msg.blocks.length - 1]
+        if (b?.type === 'recall_memory') return b as RecallMemoryBlock
+      }
+      return undefined
+    }
+    const last = _teammateLastAssistant(view)
+    if (!last) return undefined
+    const rb = last.blocks[last.blocks.length - 1]
+    if (rb?.type === 'recall_memory') return rb as RecallMemoryBlock
+    return undefined
+  }
+
+  function _handleTeammateEvent(name: string, data: any) {
+    const type = data.type as string
+    const view = _ensureTeammate(name)
+    if (!view) return
+
+    // === 流式 delta ===
+    if (type === 'text') {
+      _teammateApplyDelta(view, 'text', data.delta || data.content || '')
+    } else if (type === 'thinking') {
+      _teammateApplyDelta(view, 'thinking', data.delta || data.content || '')
+
+    // === 工具调用 ===
+    } else if (type === 'tool_start') {
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        const lb = last.blocks[last.blocks.length - 1]
+        if (lb?.type === 'thinking') lb.active = false
+        last.blocks.push({
+          type: 'tool', id: data.tool_id || '', name: data.tool_name || '',
+          input: data.tool_input ?? {}, status: 'running',
+        })
+      }
+    } else if (type === 'tool_result') {
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        const idx = last.blocks.findIndex(b => b.type === 'tool' && b.id === data.tool_id)
+        if (idx !== -1) {
+          const block = last.blocks[idx] as Extract<MessageBlock, { type: 'tool' }>
+          last.blocks.splice(idx, 1, { ...block, status: 'done', result: data.content })
+        }
+      }
+
+    // === 生命周期 ===
+    } else if (type === 'user_message') {
+      // send() 已创建空 assistant 消息，仅标记流式；若无则补建
+      const last = _teammateLastAssistant(view)
+      if (!last || last.blocks.length > 0) {
+        view.messages.push({ role: 'assistant', content: '', blocks: [] })
+      }
+    } else if (type === 'assistant_done') {
+      view.isActive = false
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        for (const b of last.blocks) {
+          if (b.type === 'thinking') b.active = false
+          if (b.type === 'inbox_message' || b.type === 'task_claimed') (b as any).active = false
+        }
+      }
+    } else if (type === 'error') {
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        last.blocks.push({ type: 'text', content: `\n❌ ${data.error_msg || ''}` } as MessageBlock)
+      }
+    } else if (type === 'teammate_error') {
+      view.isActive = false
+      try {
+        const d = JSON.parse(data.content || '{}')
+        const last = _teammateLastAssistant(view)
+        if (last) {
+          last.blocks.push({ type: 'text', content: `\n❌ ${d.error || '未知错误'}` } as MessageBlock)
+        }
+      } catch { /* ignore */ }
+
+    // === 状态事件（与 main agent 共用 MessageBlocks 渲染）===
+    } else if (type === 'micro_compact') {
+      _tmEnsureAsst(view).blocks.push({ type: 'micro_compact', content: data.content || '' })
+    } else if (type === 'inbox_message') {
+      _tmEnsureAsst(view).blocks.push({ type: 'inbox_message', content: data.content || '', active: true })
+    } else if (type === 'background_notification') {
+      _tmEnsureAsst(view).blocks.push({ type: 'background_notification', content: data.content || '' })
+    } else if (type === 'todo_reminder') {
+      _tmEnsureAsst(view).blocks.push({ type: 'todo_reminder', content: data.content || '' })
+    } else if (type === 'task_claimed') {
+      _tmEnsureAsst(view).blocks.push({ type: 'task_claimed', content: data.content || '', active: true })
+    } else if (type === 'todo_update') {
+      // teammate 的 todo 更新可选择不展示在右侧面板（只更新 main agent 的 todo）
+      // 跳过，避免覆盖 main agent 的 todo 数据
+
+    // === Auto Compact ===
+    } else if (type === 'auto_compact_start') {
+      _tmEnsureAsst(view).blocks.push({
+        type: 'auto_compact', content: data.content || '', thinking: '', summary: '',
+        compactStatus: 'running',
+      })
+    } else if (type === 'auto_compact_thinking') {
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        const ac = last.blocks[last.blocks.length - 1]
+        if (ac?.type === 'auto_compact') ac.thinking += (data.delta || '')
+      }
+    } else if (type === 'auto_compact_text') {
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        const ac = last.blocks[last.blocks.length - 1]
+        if (ac?.type === 'auto_compact') ac.summary += (data.delta || '')
+      }
+    } else if (type === 'auto_compact_done') {
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        const ac = last.blocks[last.blocks.length - 1]
+        if (ac?.type === 'auto_compact') {
+          ac.compactStatus = 'done'
+          if (data.content) ac.result = data.content
+        }
+      }
+
+    // === 子面板切换 ===
+    } else if (type === 'sub_panel_enter') {
+      if (data.tool_name === 'recall_memory') {
+        const sa = _tmActiveSubagentBlock(view)
+        if (sa) {
+          // subagent 内调用 recall_memory → 放入 subagent 当前 message
+          let msg = sa.messages[sa.messages.length - 1]
+          if (!msg) { msg = { blocks: [] }; sa.messages.push(msg) }
+          msg.blocks.push(_emptyRecallBlock(data.tool_id || '', true))
+        } else {
+          // 顶层调用 recall_memory
+          const last = _teammateLastAssistant(view)
+          if (last) last.blocks.push(_emptyRecallBlock(data.tool_id || '', true))
+        }
+      } else if (data.tool_name === 'use_subagent' && data.tool_id) {
+        const last = _teammateLastAssistant(view)
+        if (!last) return
+        let agentType = 'explore'
+        let agentName = ''
+        for (let i = last.blocks.length - 1; i >= 0; i--) {
+          const b = last.blocks[i]
+          if (b.type === 'tool' && b.name === 'use_subagent' && b.status === 'running') {
+            agentType = (b.input as any).agent_type || 'explore'
+            agentName = (b.input as any).name || ''
+            break
+          }
+        }
+        last.blocks.push(_emptySubagentBlock(data.tool_id, agentType, agentName))
+      }
+    } else if (type === 'sub_panel_exit') {
+      // 先检查 active subagent 内的 recall_memory，再检查顶层
+      const rb = _tmCurrentRecallBlock(view)
+      if (rb && rb.active) { rb.active = false; return }
+      // 检查 subagent 退出（通过 tool_id 匹配）
+      const last = _teammateLastAssistant(view)
+      if (last) {
+        for (let i = last.blocks.length - 1; i >= 0; i--) {
+          const b = last.blocks[i]
+          if (b.type === 'subagent' && b.toolId === data.tool_id) {
+            const sa = b as SubagentBlock
+            sa.active = false; sa.status = 'done'
+            break
+          }
+        }
+      }
+
+    // === Recall Memory 全管道 ===
+    } else if (type.startsWith('recall_')) {
+      const rb = _tmCurrentRecallBlock(view)
+      if (!rb) return
+      _applyRecallTranscript(rb, { type, content: data.content || data.delta || '' })
+    }
+  }
+
+  function _teammateApplyDelta(view: TeammateView, evtType: 'text' | 'thinking', delta: string) {
+    if (!view.isActive) {
+      view.isActive = true
+      view.messages.push({ role: 'assistant', content: '', blocks: [] })
+    }
+    const last = _teammateLastAssistant(view)
+    if (!last) return
+    const lastBlock = last.blocks[last.blocks.length - 1]
+    // 新内容开始时折叠收件箱/任务卡片
+    if (lastBlock && (lastBlock.type === 'inbox_message' || lastBlock.type === 'task_claimed')) {
+      lastBlock.active = false
+    }
+    if (lastBlock && lastBlock.type !== evtType && lastBlock.type === 'thinking') {
+      lastBlock.active = false
+    }
+    if (lastBlock && lastBlock.type === evtType) {
+      lastBlock.content += delta
+    } else if (evtType === 'thinking') {
+      last.blocks.push({ type: 'thinking', content: delta, active: true })
+    } else {
+      last.blocks.push({ type: 'text', content: delta })
+    }
+  }
+
+  // ── 右侧面板子面板栈（teammate 的 subagent / recall_memory 详情）──
+  const rightSubPanelStack: Ref<SubPanelEntry[]> = ref([])
+
+  function _findBlockInTeammate(name: string, toolId: string, blockType: string): RecallMemoryBlock | SubagentBlock | null {
+    const view = teammateViews.value[name]
+    if (!view) return null
+    for (const msg of view.messages) {
+      for (const b of msg.blocks) {
+        if (b.type === blockType && (b as any).toolId === toolId) return b as any
+        // 也搜索 subagent 内部
+        if (b.type === 'subagent') {
+          for (const sm of (b as SubagentBlock).messages) {
+            for (const sb of sm.blocks) {
+              if (sb.type === blockType && (sb as any).toolId === toolId) return sb as any
+            }
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  function openRightRecallDetail(toolBlock: any) {
+    const b = _findBlockInTeammate(activeTeammate.value!, toolBlock.id, 'recall_memory')
+    if (b) {
+      rightSubPanelStack.value.push({ toolId: toolBlock.id, toolName: 'recall_memory', data: b })
+    }
+  }
+
+  function openRightSubagentDetail(toolBlock: any) {
+    const b = _findBlockInTeammate(activeTeammate.value!, toolBlock.id, 'subagent')
+    if (b) {
+      rightSubPanelStack.value.push({ toolId: toolBlock.id, toolName: 'use_subagent', data: b })
+    }
+  }
+
+  function closeRightSubPanelTop() {
+    rightSubPanelStack.value.pop()
+  }
+
+  function loadTeammateSession(name: string) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    loadingTeammate.value = name
+    ws.send(JSON.stringify({ type: 'load_teammate_session', name }))
+  }
+
   function _applyDelta(type: 'text' | 'thinking', delta: string) {
     if (!isStreaming.value) return
     const last = _lastAssistant()
@@ -274,6 +577,10 @@ function _createChat() {
 
     const lastBlock = last.blocks[last.blocks.length - 1]
 
+    // 新内容开始时折叠收件箱/任务卡片
+    if (lastBlock && (lastBlock.type === 'inbox_message' || lastBlock.type === 'task_claimed')) {
+      lastBlock.active = false
+    }
     if (lastBlock && lastBlock.type !== type && lastBlock.type === 'thinking') {
       lastBlock.active = false
     }
@@ -385,6 +692,20 @@ function _createChat() {
       return
     }
 
+    if (type === 'teammate_session_state') {
+      const name = data.source
+      if (name && Array.isArray(data.transcript)) {
+        teammateViews.value[name] = {
+          source: name,
+          sessionId: data.session_id || '',
+          messages: rebuildFromTranscript(data.transcript),
+          isActive: false,
+        }
+      }
+      loadingTeammate.value = null
+      return
+    }
+
     if (type === 'session_created') {
       currentSessionId.value = data.session_id
       hasSession.value = true
@@ -401,6 +722,20 @@ function _createChat() {
       todoList.value = []
       messages.value = rebuildFromTranscript(data.transcript || [])
       isStreaming.value = false
+      return
+    }
+
+    if (type === 'team_update') {
+      try {
+        teamInfo.value = JSON.parse(data.content || '{}')
+      } catch { /* ignore */ }
+      return
+    }
+
+    // === Teammate 事件（source 非 main）→ 路由到右侧面板 ===
+
+    if (data.source && data.source !== 'main') {
+      _handleTeammateEvent(data.source, data)
       return
     }
 
@@ -460,13 +795,18 @@ function _createChat() {
         }
       }
     } else if (type === 'user_message') {
-      messages.value.push({ role: 'assistant', content: '', blocks: [] })
+      // send() 已创建空 assistant 消息，仅标记流式；若尚无（如旧版后端）则补建
+      const last = _lastAssistant()
+      if (!last || last.blocks.length > 0) {
+        messages.value.push({ role: 'assistant', content: '', blocks: [] })
+      }
       isStreaming.value = true
     } else if (type === 'assistant_done') {
       const last = _lastAssistant()
       if (last) {
         for (const b of last.blocks) {
           if (b.type === 'thinking') b.active = false
+          if (b.type === 'inbox_message' || b.type === 'task_claimed') (b as any).active = false
         }
       }
       // 同时折叠 subagent 内部所有 thinking 块
@@ -522,7 +862,11 @@ function _createChat() {
 
     } else if (type === 'inbox_message') {
       const last = _lastAssistant()
-      if (last) last.blocks.push({ type: 'inbox_message', content: data.content || '' })
+      if (last) last.blocks.push({ type: 'inbox_message', content: data.content || '', active: true })
+
+    } else if (type === 'task_claimed') {
+      const last = _lastAssistant()
+      if (last) last.blocks.push({ type: 'task_claimed', content: data.content || '', active: true })
 
     } else if (type === 'background_notification') {
       const last = _lastAssistant()
@@ -740,6 +1084,9 @@ function _createChat() {
   function send(content: string) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     messages.value.push({ role: 'user', content, blocks: [] })
+    // 立即创建 assistant 消息并标记流式中，确保后端 deltas 到达时已有容器
+    messages.value.push({ role: 'assistant', content: '', blocks: [] })
+    isStreaming.value = true
     ws.send(JSON.stringify({ type: 'send', content }))
   }
 
@@ -895,29 +1242,40 @@ function _createChat() {
         continue
       }
 
-      // 状态事件 → 作为 block 插入当前 assistant 消息
+      // 状态事件 → 作为 block 插入当前 assistant 消息（若尚无则创建）
       if (et === 'micro_compact') {
-        if (curAssistant) curAssistant.blocks.push({ type: 'micro_compact', content: entry.content || '' })
+        if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+        curAssistant.blocks.push({ type: 'micro_compact', content: entry.content || '' })
         continue
       }
 
       if (et === 'inbox_message') {
-        if (curAssistant) curAssistant.blocks.push({ type: 'inbox_message', content: entry.content || '' })
+        if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+        curAssistant.blocks.push({ type: 'inbox_message', content: entry.content || '', active: false })
+        continue
+      }
+
+      if (et === 'task_claimed') {
+        if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+        curAssistant.blocks.push({ type: 'task_claimed', content: entry.content || '', active: false })
         continue
       }
 
       if (et === 'background_notification') {
-        if (curAssistant) curAssistant.blocks.push({ type: 'background_notification', content: entry.content || '' })
+        if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+        curAssistant.blocks.push({ type: 'background_notification', content: entry.content || '' })
         continue
       }
 
       if (et === 'todo_reminder') {
-        if (curAssistant) curAssistant.blocks.push({ type: 'todo_reminder', content: entry.content || '' })
+        if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+        curAssistant.blocks.push({ type: 'todo_reminder', content: entry.content || '' })
         continue
       }
 
       if (et === 'auto_compact_start') {
-        if (curAssistant) curAssistant.blocks.push({ type: 'auto_compact', content: entry.content || '', thinking: '', summary: '', compactStatus: 'running' })
+        if (!curAssistant) { curAssistant = { role: 'assistant', content: '', blocks: [] }; rebuilt.push(curAssistant) }
+        curAssistant.blocks.push({ type: 'auto_compact', content: entry.content || '', thinking: '', summary: '', compactStatus: 'running' })
         continue
       }
 
@@ -1162,5 +1520,5 @@ function _createChat() {
     return rebuilt
   }
 
-  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, tokenUsage, todoList, mcpServers, skills, connect, send, switchSession, newSession, rewindToTurn }
+  return { messages, isStreaming, wsStatus, sessions, currentSessionId, hasSession, subPanelStack, rightSubPanelStack, tokenUsage, todoList, mcpServers, skills, teamInfo, teammateViews, activeTeammate, loadingTeammate, connect, send, switchSession, newSession, rewindToTurn, loadTeammateSession, openRightRecallDetail, openRightSubagentDetail, closeRightSubPanelTop }
 }
