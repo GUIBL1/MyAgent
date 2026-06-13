@@ -14,14 +14,17 @@ loop.py
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator
 from typing import Any
+from pathlib import Path
 
+from agents.core.session_manager import SessionManager
 from agents.core.stream_events import EventType, StreamEvent
 
 
 class MainLoop:
-    """主代理循环，封装压缩管线、通知注入、工具调用与 Todo 提醒。"""
+    """主代理循环。封装完整的用户消息处理流程："""
 
     def __init__(
         self,
@@ -39,6 +42,8 @@ class MainLoop:
         compact_threshold_pct: float,
         micro_compact_enabled: bool,
         max_output_tokens: int,
+        main_agent_sessions_dir: Path | None = None,
+        ws_handler: Any = None,
     ):
         self._system_prompt = system_prompt
         self._tools = tools
@@ -53,14 +58,89 @@ class MainLoop:
         self._compact_threshold_pct = compact_threshold_pct
         self._micro_compact_enabled = micro_compact_enabled
         self._max_output_tokens = max_output_tokens
+        self._main_agent_sessions_dir = main_agent_sessions_dir
+        self._ws_handler = ws_handler
+
+        # 跨 turn 持久状态
+        self._messages: list[dict[str, Any]] = []
+        self._stop_event = threading.Event()
 
     # ======================== public ========================
 
-    def run_main_loop(self, session: Any) -> Iterator[StreamEvent]:
+    def set_ws_handler(self, ws_handler: Any) -> None:
+        """回填 ws_handler 引用（由容器在组装完成后调用）。"""
+        self._ws_handler = ws_handler
+
+    def get_main_agent_sessions_dir(self) -> Path:
+        """返回主 agent 会话存储目录，供 ws_handler 列出会话列表。"""
+        return self._main_agent_sessions_dir
+
+    def ensure_session_manager(self) -> None:
+        """确保 main SessionManager 已注册到 ws_handler。
+
+        在 WS 连接时调用，使得首次 send 之前即可进行会话切换、回退等操作。
+        """
+        if self._ws_handler.get_session_manager("main") is None:
+            session_manager = SessionManager(sessions_dir=self._main_agent_sessions_dir)
+            self._ws_handler.register_source("main", session_manager)
+
+    def request_stop(self) -> None:
+        """请求停止当前 run。"""
+        self._stop_event.set()
+
+    def replace_messages(self, messages: list[dict[str, Any]]) -> None:
+        """替换消息列表。"""
+        self._messages[:] = messages
+
+    def clear_messages(self) -> None:
+        """清空消息列表。"""
+        self._messages.clear()
+
+    def run_main_agent(self, user_content: str) -> None:
+        """在独立线程中运行完整的主 agent 处理流程。"""
+        self._stop_event.clear()
+
+        # 首次调用时创建 SessionManager 并注册到 ws_handler
+        session_manager = self._ws_handler.get_session_manager("main")
+        if session_manager is None:
+            session_manager = SessionManager(sessions_dir=self._main_agent_sessions_dir)
+            self._ws_handler.register_source("main", session_manager)
+
+        if not user_content.strip():
+            self._ws_handler.push("main", {"type": "error", "error_msg": "empty message"})
+            return
+
+        # 首次发送时创建新会话
+        if not session_manager.session_id:
+            sid = session_manager.new_session()
+            self._ws_handler.push("main", {"type": "session_created", "session_id": sid})
+
+        # 写入用户消息到 transcript + LLM context
+        session_manager.write_transcript({"turn": session_manager.current_turn, "seq": session_manager.next_seq(), "type": "user_message", "content": user_content})
+        user_msg = {"role": "user", "content": user_content}
+        self._messages.append(user_msg)
+        session_manager.write_transcript({"turn": session_manager.current_turn, "seq": session_manager.next_seq(), "type": "context_entry", "content": json.dumps(user_msg, ensure_ascii=False)})
+        self._ws_handler.push("main", {"type": "user_message", "content": user_content})
+
+        # 执行 agent 工作循环
+        try:
+            for stream_event in self._main_agent_loop(session_manager):
+                self._ws_handler.push("main", stream_event.to_dict())
+        except Exception as exc:
+            self._ws_handler.push("main", {"type": "error", "error_msg": str(exc)})
+
+        session_manager.advance_turn()
+        self._ws_handler.push("main", {
+            "type": "session_list",
+            "sessions": session_manager.list_sessions(),
+        })
+
+    # ======================== private ========================
+
+    def _main_agent_loop(self, session_manager) -> Iterator[StreamEvent]:
         """执行主代理循环，直到模型停止发起工具调用。"""
-        messages = session.messages
-        session_manager = session.session_manager
-        stop_event = getattr(session, 'stop_event', None)
+        messages = self._messages
+        stop_event = self._stop_event
 
         todo_agent_name = ""
         background_task_agent_name = "lead"

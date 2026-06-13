@@ -83,6 +83,7 @@ class TeammateManager:
         max_iterations: int = 50,
         max_output_tokens: int = 10000,
         teammate_sessions_dir: Path | None = None,
+        ws_handler: Any = None,
     ):
         self._team_dir = team_dir
         self._team_dir.mkdir(exist_ok=True)
@@ -113,8 +114,8 @@ class TeammateManager:
         self._team_config_path = self._team_dir / "team_config.json"
         self._team_config = self._load_config()
 
-        # ws_handler 引用（由 ws_handler.handle() 回填），供推送 team_update 和 teammate 事件
-        self._ws_handler: Any = None
+        # ws_handler 引用，供推送 team_update 和 teammate 事件
+        self._ws_handler = ws_handler
 
         # 应用终止时自动将所有队友（除 lead 外）设为 shutdown
         atexit.register(self._shutdown_all_teammates)
@@ -136,7 +137,7 @@ class TeammateManager:
             self._save_config()
 
         threading.Thread(
-            target=self._teammate_loop,
+            target=self._run_teammate,
             args=(name, role, prompt),
             daemon=True,
         ).start()
@@ -153,6 +154,14 @@ class TeammateManager:
     def get_team_summary(self) -> dict:
         """返回团队摘要"""
         return self._get_team_summary()
+
+    def set_ws_handler(self, ws_handler: Any) -> None:
+        """回填 ws_handler 引用（由容器在组装完成后调用）。"""
+        self._ws_handler = ws_handler
+
+    def set_tool_handlers(self, tool_handlers: dict) -> None:
+        """回填 tool handlers（由容器在组装完成后调用）。"""
+        self._tool_handlers = tool_handlers
 
     def idle(self) -> str:
         """占位 idle 方法，保持接口完整性。"""
@@ -260,7 +269,7 @@ class TeammateManager:
                 member["status"] = status
                 self._save_config()
 
-    def _teammate_loop(self, name: str, role: str, prompt: str) -> None:
+    def _run_teammate(self, name: str, role: str, prompt: str) -> None:
         """teammate 线程入口：创建 session，消费 generator，推送事件到 ws_handler。"""
         sessions_dir = self._teammate_sessions_dir / name if self._teammate_sessions_dir else None
         session_mgr = SessionManager(sessions_dir=sessions_dir) if sessions_dir else None
@@ -272,7 +281,7 @@ class TeammateManager:
             self._ws_handler.register_source(name, session_mgr)
 
         try:
-            for stream_event in self._run_teammate(name, role, prompt, session_mgr):
+            for stream_event in self._teammate_loop(name, role, prompt, session_mgr):
                 if self._ws_handler:
                     self._ws_handler.push(name, stream_event.to_dict())
         except Exception as exc:
@@ -284,7 +293,7 @@ class TeammateManager:
                 })
             print(f"[teammate] '{name}' crashed: {exc}")
 
-    def _run_teammate(self, name: str, role: str, prompt: str, session_mgr: SessionManager | None) -> Iterator[StreamEvent]:
+    def _teammate_loop(self, name: str, role: str, prompt: str, session_mgr: SessionManager | None) -> Iterator[StreamEvent]:
         """teammate 主循环 generator（工作阶段 + 空闲阶段）。
 
         yield StreamEvent 供 ws_handler 统一处理 delta 合并、transcript、前端推送。

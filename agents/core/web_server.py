@@ -9,14 +9,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from agents.core.ws_handler import WsHandler
+from agents.core.container import MyAgentApp
 
 
 class WebServer:
     """FastAPI 服务封装。"""
 
     def __init__(self):
-        self._ws_handler = WsHandler()
+        self._agent_app = MyAgentApp()
 
     # ======================== public ========================
 
@@ -37,7 +37,7 @@ class WebServer:
             allow_headers=["*"],
         )
 
-        application.add_api_websocket_route("/ws/chat", self._ws_handler.handle)
+        application.add_api_websocket_route("/ws/chat", self._agent_app.handle)
         self._mount_frontend(application)
         return application
 

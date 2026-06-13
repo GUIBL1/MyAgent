@@ -33,7 +33,7 @@ class SubAgent:
         general_subagent_tools: list[dict[str, Any]],
         todo_manager: Any,
         context_compression_manager: Any,
-        handlers: dict[str, Any],
+        tool_handlers: dict[str, Any],
         build_system_prompt: Any,
     ):
         self._client = client
@@ -47,10 +47,14 @@ class SubAgent:
         self._general_subagent_tools = general_subagent_tools
         self._todo_manager = todo_manager
         self._context_compression_manager = context_compression_manager
-        self._handlers = handlers
+        self._tool_handlers = tool_handlers
         self._build_system_prompt = build_system_prompt
 
     # ======================== public ========================
+
+    def set_tool_handlers(self, tool_handlers: dict[str, Any]) -> None:
+        """回填 tool handlers（由容器在组装完成后调用）。"""
+        self._tool_handlers = tool_handlers
 
     def run_subagent(
         self,
@@ -139,7 +143,7 @@ class SubAgent:
                     tool_input=dict(tool_input) if tool_input else {},
                 )
 
-                handler = self._handlers.get(tool_name)
+                handler = self._tool_handlers.get(tool_name)
                 try:
                     handler_output = (
                         handler(**tool_input)

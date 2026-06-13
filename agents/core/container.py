@@ -9,13 +9,13 @@ container.py
 
 from __future__ import annotations
 
-from typing import Any
-
+from fastapi import WebSocket
 from agents.config.config import Config
 from agents.memory.memory_manager import MemoryManager
 from agents.context.compression_manager import ContextCompressionManager
 from agents.task.background_task import BackgroundManager
 from agents.core.main_loop import MainLoop
+from agents.core.ws_handler import WsHandler
 from agents.skill.skill_manager import SkillManager
 from agents.task.task_manager import TaskManager
 from agents.task.todo_manager import TodoManager
@@ -112,7 +112,7 @@ class MyAgentApp:
             general_subagent_tools=self.tool_schemas.general_subagent_tools,
             todo_manager=self.todo_manager,
             context_compression_manager=self.context_compression_manager,
-            handlers={},  # 先占位，ToolHandlers 后回填
+            tool_handlers={},  # 先占位，ToolHandlers 后回填
             build_system_prompt=self.prompts.subagent_system_prompt,
         )
         self.teammate_manager = TeammateManager(
@@ -136,6 +136,7 @@ class MyAgentApp:
             max_iterations=self.config.teammate_max_iterations,
             max_output_tokens=self.config.teammate_max_output_tokens,
             teammate_sessions_dir=self.config.teammate_sessions_dir,
+            ws_handler = None,  # 先占位，WsHandler 后回填
         )
         self.tool_handlers = ToolHandlers(
             base_tools=self.base_tools,
@@ -149,10 +150,8 @@ class MyAgentApp:
             mcp_handlers=self.mcp_manager.get_tool_handlers(),
             memory_handlers=self.memory_manager.get_tool_handlers(),
         )
-        self.subagent._handlers = self.tool_handlers.tool_handlers  # 回填
-        self.teammate_manager._tool_handlers = self.tool_handlers.tool_handlers  # 回填
-
-        self.main_agent_sessions_dir = self.config.mainagent_sessions_dir
+        self.subagent.set_tool_handlers(self.tool_handlers.tool_handlers)
+        self.teammate_manager.set_tool_handlers(self.tool_handlers.tool_handlers)
         self.main_loop = MainLoop(
             system_prompt=self.prompts.main_agent_system_prompt,
             tools=self.tool_schemas.main_agent_tools,
@@ -167,9 +166,23 @@ class MyAgentApp:
             compact_threshold_pct=self.config.mainagent_compact_threshold_pct,
             micro_compact_enabled=self.config.mainagent_micro_compact_enabled,
             max_output_tokens=self.config.mainagent_max_output_tokens,
+            main_agent_sessions_dir=self.config.mainagent_sessions_dir,
+            ws_handler = None,  # 先占位，WsHandler 后回填
         )
 
+        # ws_handler 作为组件注入
+        self.ws_handler = WsHandler(
+            mcp_manager=self.mcp_manager,
+            skill_manager=self.skill_manager,
+            teammate_manager=self.teammate_manager,
+            main_loop=self.main_loop,
+        )
+        # 回填 ws_handler 到 MainLoop 和 TeammateManager
+        self.main_loop.set_ws_handler(self.ws_handler)
+        self.teammate_manager.set_ws_handler(self.ws_handler)
 
-    def start_agent_loop(self, session: Any):
-        """启动一次主代理循环，返回 StreamEvent 生成器供 WebSocket 消费。"""
-        return self.main_loop.run_main_loop(session)
+    # ======================== public ========================
+
+    async def handle(self, websocket: WebSocket) -> None:
+        """统一入口：接受 WebSocket 连接，委托 WsHandler 处理。"""
+        await self.ws_handler.handle(websocket)
