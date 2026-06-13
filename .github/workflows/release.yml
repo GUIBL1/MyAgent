@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================================
+  # Stage 1: 多平台构建
+  # ============================================================
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: myagent-linux-x86_64
+          - os: macos-latest
+            artifact: myagent-darwin-x86_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          cd ..
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install .
+
+      - name: Extract version
+        run: python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])" > VERSION
+
+      - name: Build binary
+        run: pyinstaller myagent.spec --clean
+
+      - name: Rename binary
+        run: mv dist/myagent dist/${{ matrix.artifact }}
+
+      - name: Verify binary
+        run: dist/${{ matrix.artifact }} --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  # ============================================================
+  # Stage 2: 创建 Release + 生成 Homebrew Formula
+  # ============================================================
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Generate Homebrew formula
+        run: python scripts/generate-formula.py "${GITHUB_REF_NAME#v}" > dist/formula.rb
+
+      - name: Show formula
+        run: cat dist/formula.rb
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/myagent-linux-x86_64
+            dist/myagent-darwin-x86_64
+            dist/formula.rb
+          generate_release_notes: true
